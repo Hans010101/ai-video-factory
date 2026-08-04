@@ -1,6 +1,9 @@
 'use strict';
 
-const S = { tools: [], summary: null, current: null, jobs: [], keys: [] };
+const S = { tools: [], summary: null, current: null, jobs: [], keys: [], plan: null,
+            i18n: { tools: {}, fields: {}, status: {} } };
+const zhField = (k) => S.i18n.fields[k] || k;
+const zhStatus = (k) => S.i18n.status[k] || k;
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c =>
@@ -25,14 +28,130 @@ async function api(path, opts) {
 }
 
 /* ---------------- tabs ---------------- */
+function goTab(name) {
+  $$('#tabs button').forEach(x => x.classList.toggle('on', x.dataset.tab === name));
+  $$('.tab').forEach(s => s.classList.toggle('on', s.id === 'tab-' + name));
+  ({ queue: loadJobs, outputs: loadOutputs, tools: renderAllTools,
+     keys: loadKeys, doctor: loadDoctor }[name] || (() => {}))();
+}
 $('#tabs').addEventListener('click', e => {
   const b = e.target.closest('button[data-tab]');
-  if (!b) return;
-  $$('#tabs button').forEach(x => x.classList.toggle('on', x === b));
-  $$('.tab').forEach(s => s.classList.toggle('on', s.id === 'tab-' + b.dataset.tab));
-  ({ queue: loadJobs, outputs: loadOutputs, tools: renderAllTools,
-     keys: loadKeys, doctor: loadDoctor }[b.dataset.tab] || (() => {}))();
+  if (b) goTab(b.dataset.tab);
 });
+
+/* ---------------- 智能派单 ---------------- */
+const dz = $('#dropzone'), fi = $('#fileInput');
+$('#pickFile').onclick = () => fi.click();
+fi.onchange = () => fi.files[0] && upload(fi.files[0]);
+['dragenter', 'dragover'].forEach(ev => dz.addEventListener(ev, e => {
+  e.preventDefault(); dz.classList.add('hot');
+}));
+['dragleave', 'drop'].forEach(ev => dz.addEventListener(ev, e => {
+  e.preventDefault(); dz.classList.remove('hot');
+}));
+dz.addEventListener('drop', e => {
+  const f = e.dataTransfer.files[0];
+  if (f) upload(f);
+});
+
+async function upload(file) {
+  const fd = new FormData();
+  fd.append('file', file);
+  try {
+    toast(`正在解析 ${file.name}…`);
+    const r = await api('/api/intake/upload', { method: 'POST', body: fd });
+    $('#briefText').value = r.text;
+    $('#briefMeta').textContent = `已载入 ${r.filename}，${r.chars} 字`;
+    toast(`已载入 ${r.chars} 字，可以开始匹配`);
+  } catch (e) { toast('解析失败: ' + e.message, true); }
+}
+
+$('#planBtn').onclick = async () => {
+  const text = $('#briefText').value.trim();
+  if (!text) return toast('请先粘贴脚本或上传文档', true);
+  const btn = $('#planBtn');
+  btn.disabled = true;
+  try {
+    S.plan = await api('/api/intake/plan', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text,
+        budget_usd: parseFloat($('#budget').value) || null,
+        want_subtitle: $('#wantSub').checked,
+      }),
+    });
+    renderPlan(S.plan);
+    toast(`已解析 ${S.plan.brief.scene_count} 个分镜，匹配 ${S.plan.stages.length} 道工序`);
+  } catch (e) { toast('匹配失败: ' + e.message, true); }
+  finally { btn.disabled = false; }
+};
+
+function renderPlan(p) {
+  const b = p.brief;
+  const scenes = b.scenes.map(s => `<tr>
+    <td>第${s.index}镜</td>
+    <td>${esc(s.narration) || '<span style="color:var(--ink-3)">—</span>'}</td>
+    <td>${esc(s.visual) || '<span style="color:var(--ink-3)">—</span>'}</td></tr>`).join('');
+
+  const chain = p.stages.map((s, i) => {
+    const alts = (s.candidates || []).filter(c => c.tool !== s.tool);
+    return `<div class="stage ${s.available ? '' : 'blocked'}">
+      <div class="sn">${i + 1}</div>
+      <div>
+        <div class="sname">${esc(s.stage)}</div>
+        <div class="stool">${s.available ? esc(s.tool_label || s.tool) : '暂无可用工具'}</div>
+        <div class="swhy">${esc(s.reason)}</div>
+        <div class="swhy">${esc(s.detail)}</div>
+        ${alts.length ? `<select data-stage="${esc(s.stage)}">
+            <option value="">备选工具（默认用推荐）</option>
+            ${alts.map(c => `<option value="${esc(c.tool)}">${esc(c.label)}${c.score != null ? ` · ${c.score}` : ''}</option>`).join('')}
+          </select>` : ''}
+      </div>
+      <div class="sright">${s.available ? (s.dispatchable ? `${s.job_count} 个任务` : '待前序产物') : '受阻'}
+        ${s.score != null ? `<br>评分 ${s.score}` : ''}</div>
+    </div>`;
+  }).join('');
+
+  $('#planBody').innerHTML = `
+    <table class="scenetable">
+      <thead><tr><th>分镜</th><th>旁白</th><th>画面建议</th></tr></thead>
+      <tbody>${scenes}</tbody>
+    </table>
+    <div class="chain">${chain}</div>
+    ${p.deferred_stages && p.deferred_stages.length ? `<div class="deferred">
+      <b>${esc(p.deferred_stages.join('、'))}</b> 需要前序工序的真实产物路径才能执行，
+      本次不会下发。等配音/画面完成后，到「成片库」拿到文件，再去「单工具」页触发即可。</div>` : ''}
+    ${p.blocked_stages.length ? `<div class="deferred" style="background:var(--warn-bg);color:var(--warn)">
+      <b>${esc(p.blocked_stages.join('、'))}</b> 没有可用工具，需要先到「密钥配置」补齐相应密钥。</div>` : ''}
+    <div class="actions">
+      <button class="btn" id="runPlanBtn" ${p.runnable ? '' : 'disabled'}>
+        ④ 下发 ${p.total_jobs} 个任务</button>
+      <span class="sp">共 ${b.scene_count} 分镜 · ${b.narration_chars} 字旁白 · ${b.visual_count} 条画面建议</span>
+    </div>`;
+
+  const rb = $('#runPlanBtn');
+  if (rb) rb.onclick = runPlan;
+}
+
+async function runPlan() {
+  const overrides = {};
+  $$('#planBody select[data-stage]').forEach(s => { if (s.value) overrides[s.dataset.stage] = s.value; });
+  const btn = $('#runPlanBtn');
+  btn.disabled = true;
+  try {
+    const r = await api('/api/intake/run', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text: $('#briefText').value,
+        budget_usd: parseFloat($('#budget').value) || null,
+        want_subtitle: $('#wantSub').checked,
+        overrides,
+      }),
+    });
+    toast(`已下发 ${r.submitted} 个任务`);
+    goTab('queue');
+  } catch (e) { toast('下发失败: ' + e.message, true); btn.disabled = false; }
+}
 
 /* ---------------- catalog ---------------- */
 async function loadCatalog(refresh) {
@@ -48,7 +167,7 @@ function renderPicker(filter = '') {
   const q = filter.trim().toLowerCase();
   const groups = {};
   for (const t of S.tools) {
-    if (q && !(`${t.name} ${t.provider} ${t.capability_label} ${t.capability}`.toLowerCase().includes(q))) continue;
+    if (q && !(`${t.name} ${t.label} ${t.provider} ${t.capability_label} ${t.capability}`.toLowerCase().includes(q))) continue;
     (groups[t.capability_label] ||= []).push(t);
   }
   const keys = Object.keys(groups).sort((a, b) => groups[b].length - groups[a].length);
@@ -59,8 +178,8 @@ function renderPicker(filter = '') {
       <summary>${esc(cap)}<span class="n">${avail}/${items.length}</span></summary>
       <div class="items">${items.map(t => `
         <button class="titem ${t.available ? '' : 'blocked'} ${t.degraded ? 'degraded' : ''} ${S.current === t.name ? 'on' : ''}"
-                data-tool="${esc(t.name)}" title="${esc(t.blocked_reason || t.name)}">
-          <span class="s"></span><span class="nm">${esc(t.name)}</span>
+                data-tool="${esc(t.name)}" title="${esc(t.name)} — ${esc(t.blocked_reason || '可用')}">
+          <span class="s"></span><span class="nm">${esc(t.label || t.name)}</span>
         </button>`).join('')}</div></details>`;
   }).join('') || '<p style="padding:12px;color:var(--ink-3);font-size:.85rem">没有匹配的工具</p>';
 }
@@ -85,8 +204,9 @@ function selectTool(name) {
   $('#workspace').innerHTML = `
     <div class="whead">
       <div>
-        <h2>${esc(t.name)}</h2>
-        <div class="meta">${esc(t.provider)} · ${esc(t.capability_label)} · ${esc(t.runtime)} · v${esc(t.version)}</div>
+        <h2>${esc(t.label || t.name)}</h2>
+        <div class="meta">${esc(t.name)} · ${esc(t.provider)} · ${esc(t.capability_label)}
+          · ${t.runtime === 'local' ? '本地运行' : '云端调用'} · v${esc(t.version)}</div>
         <div class="tagline">
           ${t.degraded ? '<span class="tg warn">◐ 降级可用</span>'
             : t.available ? '<span class="tg ok">✓ 可用</span>' : '<span class="tg no">待解锁</span>'}
@@ -151,8 +271,9 @@ function field(key, spec, req) {
   const ty = spec.type || 'string';
   const desc = spec.description ? `<div class="hint">${esc(spec.description)}</div>` : '';
   const def = spec.default;
-  const label = `<label>${esc(key)}${req ? '<span class="req">*</span>' : ''}
-    <span class="ty">${esc(ty)}${spec.enum ? ' enum' : ''}</span></label>`;
+  const zh = zhField(key);
+  const label = `<label>${esc(zh)}${req ? '<span class="req">*</span>' : ''}
+    <span class="ty">${zh !== key ? esc(key) + ' · ' : ''}${esc(ty)}${spec.enum ? ' 枚举' : ''}</span></label>`;
   let input;
 
   if (spec.enum) {
@@ -256,10 +377,11 @@ function renderJobs(stats) {
   }
   $('#jobList').innerHTML = S.jobs.length ? S.jobs.map(j => `
     <div class="job">
-      <span class="st ${j.status}">${({queued:'排队',running:'执行中',success:'成功',failed:'失败',cancelled:'已取消'})[j.status]}</span>
+      <span class="st ${j.status}">${zhStatus(j.status)}</span>
       <div class="main">
-        <div class="nm">${esc(j.label || j.tool)}</div>
-        <div class="sub">${esc(j.tool)}${j.batch_id ? ` · 批次 ${esc(j.batch_id)}` : ''} · ${esc(Object.keys(j.inputs).slice(0,4).join(', '))}</div>
+        <div class="nm">${esc(j.label || S.i18n.tools[j.tool] || j.tool)}</div>
+        <div class="sub">${esc(S.i18n.tools[j.tool] || j.tool)}${j.batch_id ? ` · 批次 ${esc(j.batch_id)}` : ''}
+          · ${esc(Object.keys(j.inputs).slice(0, 4).map(zhField).join('、'))}</div>
         ${j.error ? `<div class="err">${esc(j.error).slice(0, 300)}</div>` : ''}
         ${j.artifacts_rel && j.artifacts_rel.length ? `<div class="arts">${
           j.artifacts_rel.map(a => `<a href="/media/${encodeURI(a)}" target="_blank">${esc(a.split('/').pop())}</a>`).join('')}</div>` : ''}
@@ -318,8 +440,9 @@ function renderAllTools() {
     (!q || `${t.name} ${t.provider} ${t.capability_label}`.toLowerCase().includes(q)));
   $('#allTools').innerHTML = list.map(t => `
     <div class="tcard ${t.available ? '' : 'blocked'} ${t.degraded ? 'degraded' : ''}">
-      <h4><span class="s"></span>${esc(t.name)}</h4>
-      <div class="p">${esc(t.provider)} · ${esc(t.capability_label)} · ${esc(t.runtime)}</div>
+      <h4><span class="s"></span>${esc(t.label || t.name)}</h4>
+      <div class="p">${esc(t.name)} · ${esc(t.provider)} · ${esc(t.capability_label)}
+        · ${t.runtime === 'local' ? '本地' : '云端'}</div>
       ${t.best_for.length ? `<div class="bf">${esc(t.best_for[0])}</div>` : ''}
       ${t.available && !t.degraded ? '' : `<div class="why">${esc(t.blocked_reason).slice(0, 160)}</div>`}
     </div>`).join('') || '<p style="color:var(--ink-3)">无匹配</p>';
@@ -383,5 +506,10 @@ async function loadDoctor() {
 }
 
 /* ---------------- boot ---------------- */
-loadCatalog(false).then(connect).catch(e => toast('加载失败: ' + e.message, true));
+api('/api/i18n')
+  .then(d => { S.i18n = d; })
+  .catch(() => {})
+  .then(() => loadCatalog(false))
+  .then(connect)
+  .catch(e => toast('加载失败: ' + e.message, true));
 loadJobs().catch(() => {});

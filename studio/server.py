@@ -10,18 +10,21 @@ import asyncio
 import json
 import mimetypes
 import os
+import re
 import shutil
 import subprocess
 import time
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from studio import catalog as catalog_mod
 from studio import env_manager
+from studio import i18n
+from studio import intake as intake_mod
 from studio.jobs import QUEUE, ROOT, OUTPUT_ROOT, default_output_path
 
 UI_DIR = Path(__file__).resolve().parent / "ui"
@@ -44,6 +47,19 @@ class BatchRequest(BaseModel):
 
 class KeyRequest(BaseModel):
     updates: dict[str, str] = {}
+
+
+class IntakeRequest(BaseModel):
+    text: str = ""
+    budget_usd: Optional[float] = None
+    want_subtitle: bool = True
+
+
+class IntakeRunRequest(BaseModel):
+    text: str = ""
+    budget_usd: Optional[float] = None
+    want_subtitle: bool = True
+    overrides: dict[str, str] = {}   # 阶段名 -> 手动指定的工具
 
 
 def _safe_path(rel: str) -> Path:
@@ -123,6 +139,58 @@ def create_app() -> FastAPI:
     @app.get("/api/doctor")
     def doctor() -> dict[str, Any]:
         return _doctor()
+
+    @app.get("/api/i18n")
+    def labels() -> dict[str, Any]:
+        return i18n.payload()
+
+    # ---- 智能派单 ----
+
+    @app.post("/api/intake/upload")
+    async def intake_upload(file: UploadFile = File(...)) -> dict[str, Any]:
+        data = await file.read()
+        if len(data) > 8 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="文件过大（上限 8MB）")
+        try:
+            text = intake_mod.extract_text(file.filename or "", data)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return {"filename": file.filename, "chars": len(text), "text": text}
+
+    @app.post("/api/intake/plan")
+    def intake_plan(req: IntakeRequest) -> dict[str, Any]:
+        if not req.text.strip():
+            raise HTTPException(status_code=400, detail="内容为空")
+        brief = intake_mod.parse_brief(req.text)
+        if not brief.scenes:
+            raise HTTPException(status_code=400, detail="没有解析出任何分镜，请检查内容")
+        return intake_mod.build_plan(brief, budget=req.budget_usd,
+                                     want_subtitle=req.want_subtitle)
+
+    @app.post("/api/intake/run")
+    def intake_run(req: IntakeRunRequest) -> dict[str, Any]:
+        if not req.text.strip():
+            raise HTTPException(status_code=400, detail="内容为空")
+        brief = intake_mod.parse_brief(req.text)
+        plan = intake_mod.build_plan(brief, budget=req.budget_usd,
+                                     want_subtitle=req.want_subtitle)
+        for stage in plan["stages"]:
+            override = req.overrides.get(stage["stage"])
+            if override:
+                stage["tool"] = override
+                stage["tool_label"] = i18n.tool_name(override)
+                stage["reason"] = "手动指定"
+
+        jobs = intake_mod.plan_to_jobs(brief, plan)
+        if not jobs:
+            raise HTTPException(status_code=400, detail="没有可下发的任务（相关能力暂无可用工具）")
+
+        submitted = []
+        for spec in jobs:
+            inputs = _fill_defaults(spec["tool"], spec["inputs"])
+            job = QUEUE.submit(spec["tool"], inputs, label=spec["label"])
+            submitted.append(job.id)
+        return {"submitted": len(submitted), "job_ids": submitted, "plan": plan}
 
     # ---- keys ----
 
@@ -262,19 +330,31 @@ def _fill_defaults(tool_name: str, inputs: dict[str, Any]) -> dict[str, Any]:
     return cleaned
 
 
+_CJK = re.compile(r"[一-鿿]")
+
+
 def _resolve_piper_model(tool_name: str, inputs: dict[str, Any]) -> None:
     """Expand a bare Piper voice name to the downloaded .onnx path.
 
     piper_tts passes `model` straight to the CLI without --data-dir, so a bare
     name like "en_US-lessac-medium" only resolves if the model happens to sit
     in the working directory. Voices live in ~/.piper/models.
+
+    When the caller didn't pick a voice, choose by script language — Chinese
+    narration read by an English voice is unusable.
     """
     if tool_name != "piper_tts":
         return
-    model = str(inputs.get("model") or "en_US-lessac-medium")
+    models_dir = Path.home() / ".piper" / "models"
+    model = str(inputs.get("model") or "").strip()
+
+    if not model:
+        text = str(inputs.get("text") or "")
+        model = "zh_CN-huayan-medium" if _CJK.search(text) else "en_US-lessac-medium"
+
     if "/" in model or model.endswith(".onnx"):
         return
-    candidate = Path.home() / ".piper" / "models" / f"{model}.onnx"
+    candidate = models_dir / f"{model}.onnx"
     if candidate.exists():
         inputs["model"] = str(candidate)
 

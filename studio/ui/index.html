@@ -12,19 +12,75 @@
 <header class="topbar">
   <div class="brand"><span class="mark">🎬</span>AI 视频工厂<em>工作台</em></div>
   <nav class="tabs" id="tabs">
-    <button data-tab="produce" class="on">生产</button>
-    <button data-tab="queue">队列 <span class="pill" id="pillQueue">0</span></button>
+    <button data-tab="intake" class="on">智能派单</button>
+    <button data-tab="produce">单工具</button>
+    <button data-tab="queue">任务队列 <span class="pill" id="pillQueue">0</span></button>
     <button data-tab="outputs">成片库</button>
     <button data-tab="tools">工具库 <span class="pill" id="pillTools">–</span></button>
-    <button data-tab="keys">密钥</button>
-    <button data-tab="doctor">环境</button>
+    <button data-tab="keys">密钥配置</button>
+    <button data-tab="doctor">运行环境</button>
   </nav>
   <div class="status" id="conn"><span class="dot"></span>连接中</div>
 </header>
 
 <main>
-  <!-- ============ 生产 ============ -->
-  <section id="tab-produce" class="tab on">
+  <!-- ============ 智能派单 ============ -->
+  <section id="tab-intake" class="tab on">
+    <div class="intake-grid">
+      <div class="card-panel">
+        <h3 class="ph">① 投入内容</h3>
+        <p class="pd">粘贴脚本、提示词、画面建议，或直接上传文档（txt / md / docx / pdf）。
+          系统会解析成分镜表，自动匹配工具并编排工序。</p>
+
+        <div class="uploadzone" id="dropzone">
+          <input type="file" id="fileInput" accept=".txt,.md,.markdown,.docx,.pdf" hidden>
+          <span>拖入文档，或 <button class="linkbtn" id="pickFile">点击选择文件</button></span>
+          <small>支持 txt / md / docx / pdf，上限 8MB</small>
+        </div>
+
+        <textarea id="briefText" rows="14" placeholder="示例写法（三种可混用）：
+
+产品发布短片
+
+场景1
+旁白：全新一代产品，重新定义效率。
+画面：产品特写，暗黑背景，冷光打亮
+
+场景2
+旁白：三倍性能，一半功耗。
+画面：数据图表动态增长
+
+—— 也可以完全不加标记，每段空行分隔即视为一条旁白。"></textarea>
+
+        <div class="row2" style="margin-top:12px">
+          <div class="fld">
+            <label>预算上限（美元，可空）</label>
+            <input class="inp" id="budget" type="number" step="0.5" placeholder="不限">
+          </div>
+          <div class="fld">
+            <label>字幕</label>
+            <label class="chk" style="padding-top:7px">
+              <input type="checkbox" id="wantSub" checked> 需要生成字幕</label>
+          </div>
+        </div>
+
+        <div class="actions">
+          <button class="btn" id="planBtn">② 解析并匹配工具</button>
+          <span class="sp" id="briefMeta"></span>
+        </div>
+      </div>
+
+      <div class="card-panel" id="planPanel">
+        <h3 class="ph">③ 工序链</h3>
+        <p class="pd">解析后这里会列出分镜表和每道工序选中的工具、评分与理由。</p>
+        <div id="planBody"><div class="empty" style="padding:40px 10px">
+          <p>还没有内容。先在左侧投入脚本或上传文档。</p></div></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 单工具 ============ -->
+  <section id="tab-produce" class="tab">
     <div class="split">
       <aside class="picker">
         <input type="search" id="toolSearch" placeholder="搜索工具… (102 个)" autocomplete="off">

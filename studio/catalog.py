@@ -20,6 +20,8 @@ from typing import Any
 from tools.base_tool import DependencyError
 from tools.tool_registry import registry
 
+from studio import i18n
+
 # Matches os.environ.get("X") / os.getenv("X") / os.environ["X"]
 _ENV_RE = re.compile(r"""os\.(?:environ\.get|getenv)\(\s*["']([A-Z0-9_]+)["']|os\.environ\[\s*["']([A-Z0-9_]+)["']""")
 
@@ -78,7 +80,7 @@ def _describe(tool: Any) -> dict[str, Any]:
         dependency_ok = True
     except DependencyError as exc:
         dependency_ok = False
-        blocked_reason = str(exc).split("\n")[0]
+        blocked_reason = i18n.localize_dependency_error(str(exc))
 
     # DEGRADED means "runs with reduced capability" (e.g. face_tracker with
     # OpenCV but no MediaPipe) — it is runnable, so treat it as usable and
@@ -108,6 +110,7 @@ def _describe(tool: Any) -> dict[str, Any]:
 
     return {
         "name": tool.name,
+        "label": i18n.tool_name(tool.name),
         "version": tool.version,
         "status": status,
         "degraded": degraded,
@@ -124,8 +127,8 @@ def _describe(tool: Any) -> dict[str, Any]:
         "dependencies": list(tool.dependencies),
         "install_instructions": tool.install_instructions,
         "input_schema": tool.input_schema or {},
-        "best_for": list(tool.best_for),
-        "not_good_for": list(tool.not_good_for),
+        "best_for": [i18n.localize_phrase(b) for b in tool.best_for],
+        "not_good_for": [i18n.localize_phrase(b) for b in tool.not_good_for],
         "capabilities": list(tool.capabilities),
         "cost_hint": "cloud" if tool.runtime.value != "local" else "local",
     }
@@ -150,7 +153,7 @@ def _catalog_cached() -> tuple[dict[str, Any], ...]:
                 "best_for": [], "not_good_for": [], "capabilities": [],
                 "tier": "core", "runtime": "local", "stability": "experimental",
                 "execution_mode": "sync", "version": "?", "cost_hint": "local",
-                "status": "unavailable", "degraded": False,
+                "status": "unavailable", "degraded": False, "label": i18n.tool_name(name),
             })
     return tuple(items)
 
