@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI 视频工厂 · 云端派单</title>
+<meta name="theme-color" content="#C8102E">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎬</text></svg>">
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  color-scheme:light;
+  --red:#C8102E;--red-bright:#E8112D;--red-deep:#8E0B20;--red-tint:#FFF5F6;--red-line:#F2D2D7;
+  --bg:#FAFAFB;--ink:#1A1A1C;--ink-2:#4A4D55;--ink-3:#6A7080;--line:#E6E8EC;
+  --ok:#0E7A4B;--ok-bg:#EBF7F1;--err:#B3261E;--err-bg:#FDECEA;--run:#0B5FA5;--run-bg:#EAF3FB;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB",sans-serif;
+  --shadow:0 1px 2px rgba(16,18,24,.05),0 3px 12px rgba(16,18,24,.05);
+}
+body{background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:15px;line-height:1.7;
+  -webkit-font-smoothing:antialiased}
+.wrap{max-width:860px;margin:0 auto;padding:0 16px 60px}
+header{background:#fff;border-bottom:1px solid var(--line);padding:14px 0;margin-bottom:20px;
+  position:sticky;top:0;z-index:20}
+header .wrap{display:flex;align-items:center;gap:10px}
+.brand{display:flex;align-items:center;gap:8px;font-weight:800}
+.brand .m{width:26px;height:26px;border-radius:7px;display:grid;place-items:center;font-size:.78rem;
+  background:linear-gradient(140deg,var(--red-bright),var(--red-deep))}
+.agent{margin-left:auto;font-size:.78rem;color:var(--ink-3);display:flex;align-items:center;gap:6px}
+.agent .d{width:8px;height:8px;border-radius:50%;background:#C9CDD4}
+.agent.on .d{background:var(--ok);box-shadow:0 0 0 3px rgba(14,122,75,.15)}
+.agent.on{color:var(--ok)}
+
+.card{background:#fff;border:1px solid var(--line);border-radius:12px;padding:18px;
+  margin-bottom:16px;box-shadow:var(--shadow)}
+h2{font-size:1.02rem;font-weight:800;margin-bottom:4px}
+.hint{font-size:.83rem;color:var(--ink-3);margin-bottom:14px}
+textarea,input{width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:9px;
+  font:inherit;font-size:.92rem;background:#fff;color:var(--ink)}
+textarea{font-size:.9rem;line-height:1.7;resize:vertical;min-height:150px}
+textarea:focus,input:focus{outline:none;border-color:var(--red);box-shadow:0 0 0 3px rgba(200,16,46,.1)}
+label.f{display:block;font-size:.83rem;font-weight:700;margin:12px 0 5px}
+.btn{background:var(--red);color:#fff;border:none;font:inherit;font-weight:700;font-size:.92rem;
+  padding:11px 24px;border-radius:9px;cursor:pointer;margin-top:14px;width:100%}
+.btn:hover{background:var(--red-deep)}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+.btn.ghost{background:#fff;color:var(--ink-2);border:1px solid var(--line);width:auto;
+  padding:6px 14px;font-size:.82rem;margin:0}
+
+.order{background:#fff;border:1px solid var(--line);border-radius:12px;padding:16px;
+  margin-bottom:12px;box-shadow:var(--shadow)}
+.order .oh{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+.order .ot{font-weight:800;font-size:.96rem}
+.st{font-size:.72rem;font-weight:700;padding:2px 10px;border-radius:20px;white-space:nowrap}
+.st.pending{background:#F4F5F7;color:var(--ink-3)}
+.st.claimed,.st.planned,.st.running{background:var(--run-bg);color:var(--run)}
+.st.done,.st.success{background:var(--ok-bg);color:var(--ok)}
+.st.failed{background:var(--err-bg);color:var(--err)}
+.st.queued{background:#F4F5F7;color:var(--ink-3)}
+.order .om{font-size:.78rem;color:var(--ink-3);font-family:var(--mono);margin-left:auto}
+.order .bp{font-size:.85rem;color:var(--ink-2);margin-top:8px;
+  overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+.jobs{margin-top:12px;border-top:1px solid var(--line);padding-top:11px;display:grid;gap:7px}
+.job{display:flex;align-items:center;gap:9px;font-size:.84rem;flex-wrap:wrap}
+.job .jn{font-weight:600}
+.job .je{color:var(--err);font-size:.78rem;width:100%}
+.arts{display:flex;gap:6px;flex-wrap:wrap;margin-left:auto}
+.arts a{font-size:.75rem;background:var(--red-tint);border:1px solid var(--red-line);
+  color:var(--red-deep);padding:2px 9px;border-radius:5px;font-family:var(--mono);text-decoration:none}
+.note{font-size:.8rem;color:var(--ink-3);margin-top:8px;background:#F7F8FA;
+  padding:8px 11px;border-radius:7px}
+.empty{text-align:center;color:var(--ink-3);padding:34px 10px;font-size:.9rem}
+.toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%) translateY(18px);
+  background:var(--ink);color:#fff;padding:11px 22px;border-radius:9px;font-size:.88rem;
+  font-weight:600;opacity:0;pointer-events:none;transition:.2s;z-index:99}
+.toast.on{opacity:1;transform:translateX(-50%) translateY(0)}
+.toast.err{background:var(--err)}
+.gate{max-width:400px;margin:70px auto;text-align:center}
+</style>
+</head>
+<body>
+
+<header><div class="wrap">
+  <div class="brand"><span class="m">🎬</span>AI 视频工厂</div>
+  <div class="agent" id="agentBadge"><span class="d"></span><span id="agentText">检测渲染代理…</span></div>
+</div></header>
+
+<div class="wrap">
+  <div id="gate" class="gate" style="display:none">
+    <div class="card">
+      <h2>访问令牌</h2>
+      <p class="hint">首次访问需要输入令牌，之后会记住。</p>
+      <input type="password" id="tokenInput" placeholder="粘贴访问令牌">
+      <button class="btn" id="tokenBtn">进入</button>
+    </div>
+  </div>
+
+  <div id="app" style="display:none">
+    <div class="card">
+      <h2>派单</h2>
+      <p class="hint">粘贴脚本、提示词、画面建议。提交后本地渲染代理会自动认领、解析分镜、匹配工具并执行。</p>
+      <label class="f">标题（可空）</label>
+      <input id="title" placeholder="例如：产品发布短片">
+      <label class="f">内容</label>
+      <textarea id="brief" placeholder="场景1
+旁白：全新一代产品，重新定义效率。
+画面：产品特写，暗黑背景，冷光打亮
+
+场景2
+旁白：三倍性能，一半功耗。
+画面：数据图表动态增长"></textarea>
+      <button class="btn" id="submitBtn">提交订单</button>
+    </div>
+
+    <div style="display:flex;align-items:center;gap:10px;margin:22px 0 12px">
+      <h2 style="margin:0">订单</h2>
+      <button class="btn ghost" style="margin-left:auto" onclick="load()">刷新</button>
+    </div>
+    <div id="orders"></div>
+  </div>
+</div>
+
+<div id="toast" class="toast"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+let TOKEN = localStorage.getItem('avf_token') || '';
+
+function toast(m, err) {
+  const t = $('#toast');
+  t.textContent = m;
+  t.className = 'toast on' + (err ? ' err' : '');
+  clearTimeout(t._t); t._t = setTimeout(() => t.className = 'toast', 3000);
+}
+
+async function api(path, opts = {}) {
+  const r = await fetch(path, {
+    ...opts,
+    headers: { ...(opts.headers || {}), 'authorization': 'Bearer ' + TOKEN },
+  });
+  if (r.status === 401) { showGate(); throw new Error('令牌无效'); }
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
+  return r.json();
+}
+
+function showGate() {
+  $('#gate').style.display = 'block';
+  $('#app').style.display = 'none';
+}
+
+$('#tokenBtn').onclick = async () => {
+  TOKEN = $('#tokenInput').value.trim();
+  if (!TOKEN) return;
+  try {
+    await api('/api/health');
+    localStorage.setItem('avf_token', TOKEN);
+    $('#gate').style.display = 'none';
+    $('#app').style.display = 'block';
+    load();
+  } catch (e) { toast('令牌无效', true); }
+};
+
+$('#submitBtn').onclick = async () => {
+  const brief = $('#brief').value.trim();
+  if (!brief) return toast('内容不能为空', true);
+  const btn = $('#submitBtn'); btn.disabled = true;
+  try {
+    await api('/api/orders', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ brief, title: $('#title').value.trim() }),
+    });
+    $('#brief').value = ''; $('#title').value = '';
+    toast('订单已提交，等待本地代理认领');
+    load();
+  } catch (e) { toast('提交失败: ' + e.message, true); }
+  finally { btn.disabled = false; }
+};
+
+const esc = s => String(s ?? '').replace(/[&<>"']/g,
+  c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const ST = { pending: '等待认领', claimed: '已认领', planned: '已规划', running: '执行中',
+             done: '完成', failed: '失败', queued: '排队', success: '成功' };
+
+async function load() {
+  try {
+    const d = await api('/api/orders');
+    render(d.orders);
+    updateAgent(d.orders);
+  } catch (e) { /* gate 已处理 */ }
+}
+
+function updateAgent(orders) {
+  // 有订单被认领过就说明代理连过；用最近一次代理活动时间判断在线
+  const latest = orders.filter(o => o.agent).sort((a, b) => b.updated_at - a.updated_at)[0];
+  const badge = $('#agentBadge'), text = $('#agentText');
+  if (latest && Date.now() - latest.updated_at < 120000) {
+    badge.className = 'agent on';
+    text.textContent = '渲染代理在线 · ' + latest.agent;
+  } else {
+    badge.className = 'agent';
+    text.textContent = latest ? '代理离线（上次 ' + new Date(latest.updated_at).toLocaleString('zh-CN') + '）'
+                              : '渲染代理未连接';
+  }
+}
+
+function render(orders) {
+  if (!orders.length) {
+    $('#orders').innerHTML = '<div class="empty">还没有订单。在上面提交第一个。</div>';
+    return;
+  }
+  $('#orders').innerHTML = orders.map(o => `
+    <div class="order">
+      <div class="oh">
+        <span class="ot">${esc(o.title || '未命名订单')}</span>
+        <span class="st ${esc(o.status)}">${ST[o.status] || esc(o.status)}</span>
+        <span class="om">${new Date(o.created_at).toLocaleString('zh-CN')}</span>
+      </div>
+      <div class="bp">${esc(o.brief_preview)}</div>
+      ${o.note ? `<div class="note">${esc(o.note)}</div>` : ''}
+      ${o.jobs.length ? `<div class="jobs">${o.jobs.map(j => `
+        <div class="job">
+          <span class="st ${esc(j.status)}">${ST[j.status] || esc(j.status)}</span>
+          <span class="jn">${esc(j.label || j.tool_label || j.tool)}</span>
+          ${j.artifacts.length ? `<span class="arts">${j.artifacts.map(k =>
+            `<a href="/media/${encodeURIComponent(k)}?token=${encodeURIComponent(TOKEN)}"
+                target="_blank">${esc(k.split('/').pop())}</a>`).join('')}</span>` : ''}
+          ${j.error ? `<span class="je">${esc(j.error).slice(0, 200)}</span>` : ''}
+        </div>`).join('')}</div>` : ''}
+    </div>`).join('');
+}
+
+if (TOKEN) {
+  api('/api/health').then(() => {
+    $('#app').style.display = 'block';
+    load();
+    setInterval(load, 8000);
+  }).catch(showGate);
+} else showGate();
+</script>
+</body>
+</html>

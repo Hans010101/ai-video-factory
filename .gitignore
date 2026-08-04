@@ -101,3 +101,6 @@ venv/
 # 本地渲染产物与环境
 projects/demos/renders/
 projects/studio/
+
+# 云端访问令牌（本地保存，勿提交）
+.avf-token

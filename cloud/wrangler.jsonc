@@ -1,0 +1,32 @@
+{
+  // AI 视频工厂 · 云端控制面
+  // 全部使用 Cloudflare 免费额度：Workers 10万请求/天、D1 5GB、R2 10GB（出网免费）
+  // 渲染不在这里执行 —— 由本地 studio/agent.py 认领任务后用本机算力完成。
+  "name": "ai-video-factory",
+  "main": "src/index.js",
+  "compatibility_date": "2026-08-01",
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    // 静态资源路由默认在 Worker 之前执行；不显式让 /api、/media 先进 Worker 的话，
+    // 这两类请求会被资源层直接判 404，脚本根本不会被调用。
+    "run_worker_first": ["/api/*", "/media/*"],
+    "not_found_handling": "none"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "ai-video-factory-db",
+      "database_id": "0c004bc0-7ff5-4a1c-8818-dd04d61f648f"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "ASSETS_BUCKET",
+      "bucket_name": "ai-video-factory-assets"
+    }
+  ],
+  "observability": {
+    "enabled": true
+  }
+}
