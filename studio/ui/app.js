@@ -66,6 +66,30 @@ async function upload(file) {
   } catch (e) { toast('解析失败: ' + e.message, true); }
 }
 
+// 花钱的选项必须让人看得见代价：按分镜数实时算最坏情况花费
+function updateCostNote() {
+  const mode = $('#aiFallback').value;
+  const note = $('#costNote');
+  if (mode === 'off') { note.style.display = 'none'; return; }
+  const scenes = (S.plan && S.plan.brief) ? S.plan.brief.visual_count
+    : ($('#briefText').value.match(/^\s*画面\s*[:：]/gm) || []).length;
+  const unit = mode === 'image' ? 0.04 : 0.5;
+  const cap = parseFloat($('#budget').value);
+  note.style.display = 'block';
+  note.innerHTML = `⚠️ 已开启 AI 生成兜底（${mode === 'image' ? '图片' : '视频'}，约 $${unit}/段）。`
+    + (scenes ? `当前 ${scenes} 条画面建议，<b>最坏情况全部生成约 $${(scenes * unit).toFixed(2)}</b>。` : '')
+    + (cap > 0 ? `预算上限 $${cap.toFixed(2)}，超出即停。` : '<b>未设上限</b>，建议填一个。');
+}
+$('#aiFallback').addEventListener('change', updateCostNote);
+$('#budget').addEventListener('input', updateCostNote);
+$('#briefText').addEventListener('input', updateCostNote);
+
+const intakeOptions = () => ({
+  budget_usd: parseFloat($('#budget').value) || null,
+  want_subtitle: $('#wantSub').checked,
+  ai_fallback: $('#aiFallback').value,
+});
+
 $('#planBtn').onclick = async () => {
   const text = $('#briefText').value.trim();
   if (!text) return toast('请先粘贴脚本或上传文档', true);
@@ -74,12 +98,9 @@ $('#planBtn').onclick = async () => {
   try {
     S.plan = await api('/api/intake/plan', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        text,
-        budget_usd: parseFloat($('#budget').value) || null,
-        want_subtitle: $('#wantSub').checked,
-      }),
+      body: JSON.stringify({ text, ...intakeOptions() }),
     });
+    updateCostNote();
     renderPlan(S.plan);
     toast(`已解析 ${S.plan.brief.scene_count} 个分镜，匹配 ${S.plan.stages.length} 道工序`);
   } catch (e) { toast('匹配失败: ' + e.message, true); }
@@ -141,12 +162,7 @@ async function runPlan() {
   try {
     const r = await api('/api/intake/run', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        text: $('#briefText').value,
-        budget_usd: parseFloat($('#budget').value) || null,
-        want_subtitle: $('#wantSub').checked,
-        overrides,
-      }),
+      body: JSON.stringify({ text: $('#briefText').value, ...intakeOptions(), overrides }),
     });
     toast(`已下发 ${r.submitted} 个任务`);
     goTab('queue');

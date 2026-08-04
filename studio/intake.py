@@ -278,7 +278,7 @@ def _one_shot_available() -> bool:
 
 
 def build_plan(brief: Brief, budget: Optional[float] = None,
-               want_subtitle: bool = True) -> dict[str, Any]:
+               want_subtitle: bool = True, ai_fallback: str = "off") -> dict[str, Any]:
     """根据分镜表推断需要哪些能力，并编排成工序链。
 
     优先走「一键成片」：zero_key_video 内部已经把配音 → 素材 → 排布 →
@@ -291,7 +291,7 @@ def build_plan(brief: Brief, budget: Optional[float] = None,
     has_visual = any(s.visual for s in brief.scenes)
 
     if _one_shot_available():
-        return _build_oneshot_plan(brief, has_narration, has_visual)
+        return _build_oneshot_plan(brief, has_narration, has_visual, ai_fallback, budget)
 
     stages: list[dict[str, Any]] = []
 
@@ -352,12 +352,22 @@ def _footage_provider() -> tuple[str, str]:
     return "无可用素材源", "将退回纯文字动画画面"
 
 
-def _build_oneshot_plan(brief: Brief, has_narration: bool, has_visual: bool) -> dict[str, Any]:
+def _build_oneshot_plan(brief: Brief, has_narration: bool, has_visual: bool,
+                        ai_fallback: str = "off",
+                        budget: Optional[float] = None) -> dict[str, Any]:
     """一键成片：工序链只做展示，实际下发一个合成任务。"""
     scene_n = len(brief.scenes)
     narr_n = sum(1 for s in brief.scenes if s.narration)
     vis_n = sum(1 for s in brief.scenes if s.visual)
     src_name, src_note = _footage_provider()
+
+    ai_fallback = (ai_fallback or "off").lower()
+    if ai_fallback in ("image", "video"):
+        unit = 0.04 if ai_fallback == "image" else 0.5
+        kind = "图像" if ai_fallback == "image" else "视频"
+        est = f"最坏情况 {vis_n} 镜全部生成约 ${vis_n * unit:.2f}"
+        cap = f"，预算上限 ${float(budget):.2f}" if budget else "，未设上限"
+        src_note += f"；检索没命中时用 AI 生成{kind}兜底（约 ${unit}/段，{est}{cap}）"
 
     # 这些是 zero_key_video 内部会依次做的事，列出来是为了让你看清链路，
     # 它们不会各自入队 —— 全部在同一个任务里完成。
@@ -391,6 +401,9 @@ def _build_oneshot_plan(brief: Brief, has_narration: bool, has_visual: bool) -> 
         "deferred_stages": [],
         "oneshot": True,
         "note": f"共 {scene_n} 个分镜，一个任务直接产出成片",
+        # 交给 plan_to_jobs 拼进任务输入
+        "ai_fallback": ai_fallback,
+        "budget_usd": budget,
     }
 
 
@@ -403,10 +416,16 @@ def plan_to_jobs(brief: Brief, plan: dict[str, Any]) -> list[dict[str, Any]]:
     jobs: list[dict[str, Any]] = []
 
     if plan.get("oneshot"):
+        job_inputs: dict[str, Any] = {"brief": brief.raw_text, "title": brief.title}
+        ai_fallback = plan.get("ai_fallback") or "off"
+        if ai_fallback in ("image", "video"):
+            job_inputs["ai_fallback"] = ai_fallback
+            if plan.get("budget_usd"):
+                job_inputs["budget_usd"] = float(plan["budget_usd"])
         return [{
             "tool": "zero_key_video",
             "label": (brief.title or "成片") + f" · {len(brief.scenes)} 镜",
-            "inputs": {"brief": brief.raw_text, "title": brief.title},
+            "inputs": job_inputs,
         }]
 
     by_stage = {s["stage"]: s for s in plan["stages"]}

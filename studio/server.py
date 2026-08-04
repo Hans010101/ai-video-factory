@@ -53,12 +53,14 @@ class IntakeRequest(BaseModel):
     text: str = ""
     budget_usd: Optional[float] = None
     want_subtitle: bool = True
+    ai_fallback: str = "off"         # off / image / video
 
 
 class IntakeRunRequest(BaseModel):
     text: str = ""
     budget_usd: Optional[float] = None
     want_subtitle: bool = True
+    ai_fallback: str = "off"
     overrides: dict[str, str] = {}   # 阶段名 -> 手动指定的工具
 
 
@@ -165,7 +167,8 @@ def create_app() -> FastAPI:
         if not brief.scenes:
             raise HTTPException(status_code=400, detail="没有解析出任何分镜，请检查内容")
         return intake_mod.build_plan(brief, budget=req.budget_usd,
-                                     want_subtitle=req.want_subtitle)
+                                     want_subtitle=req.want_subtitle,
+                                     ai_fallback=req.ai_fallback)
 
     @app.post("/api/intake/run")
     def intake_run(req: IntakeRunRequest) -> dict[str, Any]:
@@ -173,7 +176,8 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="内容为空")
         brief = intake_mod.parse_brief(req.text)
         plan = intake_mod.build_plan(brief, budget=req.budget_usd,
-                                     want_subtitle=req.want_subtitle)
+                                     want_subtitle=req.want_subtitle,
+                                     ai_fallback=req.ai_fallback)
         for stage in plan["stages"]:
             override = req.overrides.get(stage["stage"])
             if override:

@@ -54,15 +54,23 @@
 
         <div class="row2" style="margin-top:12px">
           <div class="fld">
-            <label>预算上限（美元，可空）</label>
-            <input class="inp" id="budget" type="number" step="0.5" placeholder="不限">
+            <label>画面来源</label>
+            <select id="aiFallback">
+              <option value="off" selected>仅检索实拍素材（免费）</option>
+              <option value="image">检索不到时 AI 生成图片（约 $0.04/张）</option>
+              <option value="video">检索不到时 AI 生成视频（约 $0.5/段）</option>
+            </select>
+            <div class="hint">始终优先检索素材库；只有没命中才动用 AI 生成</div>
           </div>
           <div class="fld">
-            <label>字幕</label>
-            <label class="chk" style="padding-top:7px">
-              <input type="checkbox" id="wantSub" checked> 需要生成字幕</label>
+            <label>AI 生成预算上限（美元）</label>
+            <input class="inp" id="budget" type="number" step="0.1" min="0" placeholder="不限">
+            <div class="hint">超出后不再生成，改用文字画面，不会静默超支</div>
           </div>
         </div>
+        <label class="chk" style="margin-top:10px">
+          <input type="checkbox" id="wantSub" checked> 需要生成字幕</label>
+        <div class="costnote" id="costNote" style="display:none"></div>
 
         <div class="actions">
           <button class="btn" id="planBtn">② 解析并匹配工具</button>
