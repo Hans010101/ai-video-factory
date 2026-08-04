@@ -97,3 +97,6 @@ venv/
 
 # Backlot local cache (thumbnails)
 .backlot/
+
+# 本地渲染产物与环境
+projects/demos/renders/
