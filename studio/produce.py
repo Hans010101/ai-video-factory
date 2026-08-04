@@ -138,6 +138,64 @@ def fetch_footage(query: str, out_dir: Path, index: int) -> Optional[dict[str, s
     return None
 
 
+# 兜底生成器按「便宜优先」排序。图像比视频便宜一到两个数量级：
+# Imagen $0.04/张，而 Veo $2.0/段 —— 5 镜的片子就是 $0.2 对 $10。
+# gemini_image 排在 google_imagen 前面：后者调的 Imagen `:predict` 端点已对
+# 新 Google 账户停止开放（404 no longer available to new users）。
+AI_FALLBACK_TOOLS = {
+    "image": ("gemini_image", "google_imagen", "openai_image", "image_gen"),
+    "video": ("gemini_omni_video", "sora_video", "veo_video"),
+}
+
+
+def generate_shot(query: str, out_dir: Path, index: int, kind: str,
+                  budget_left: Optional[float]) -> tuple[Optional[dict[str, str]], float]:
+    """素材源没命中时，用 AI 生成一张图或一段视频顶上。
+
+    返回 (shot, 实际花费)。预算不够或没有可用生成器时返回 (None, 0.0)，
+    由调用方退回文字画面 —— 宁可画面朴素，也不能悄悄超预算。
+    """
+    if not query.strip():
+        return None, 0.0
+    from tools.tool_registry import registry
+    registry.ensure_discovered()
+
+    suffix = ".png" if kind == "image" else ".mp4"
+    for name in AI_FALLBACK_TOOLS.get(kind, ()):
+        tool = registry.get(name)
+        if tool is None or tool.get_status().value not in ("available", "degraded"):
+            continue
+
+        inputs: dict[str, Any] = {"prompt": query,
+                                  "output_path": str(out_dir / f"shot_{index:03d}{suffix}")}
+        try:
+            estimate = float(tool.estimate_cost(inputs) or 0.0)
+        except Exception:
+            estimate = 0.0
+        if budget_left is not None and estimate > budget_left:
+            continue  # 换更便宜的，都超预算就放弃
+
+        try:
+            result = tool.execute(inputs)
+        except Exception:
+            continue
+        if not result.success:
+            continue
+        path = Path((result.artifacts or [inputs["output_path"]])[0])
+        if not path.exists() or path.stat().st_size < 10_000:
+            continue
+
+        spent = float(result.cost_usd or estimate)
+        return {
+            "file": path.name,
+            "source": f"AI 生成 · {name}",
+            "creator": "",
+            "license": "",
+            "url": "",
+        }, spent
+    return None, 0.0
+
+
 def build_credits(shots: list[Optional[dict[str, str]]]) -> str:
     """生成片尾署名文案。
 
@@ -149,13 +207,21 @@ def build_credits(shots: list[Optional[dict[str, str]]]) -> str:
     for shot in shots:
         if not shot:
             continue
-        who = shot.get("creator") or "—"
-        src = (shot.get("source") or "").replace("_", " ").title()
-        key = f"{src}|{who}"
-        if key in seen:
+        raw_source = shot.get("source") or ""
+        who = (shot.get("creator") or "").strip()
+
+        if raw_source.startswith("AI 生成"):
+            # AI 生成没有摄影师，标出模型即可；也不能套 .title()，
+            # 那会把「AI」变成「Ai」。
+            entry = raw_source
+        else:
+            src = raw_source.replace("_", " ").title()
+            entry = f"{src} · {who}" if who else src
+
+        if entry in seen:
             continue
-        seen.add(key)
-        lines.append(f"{src} · {who}")
+        seen.add(entry)
+        lines.append(entry)
     return "素材来源：" + "；".join(lines) if lines else ""
 
 
@@ -283,7 +349,11 @@ class ZeroKeyVideo(BaseTool):
             "title": {"type": "string", "description": "片头标题，留空则自动取脚本首行"},
             "theme": {"type": "string", "enum": ["brand", "slate", "light"], "default": "brand"},
             "use_footage": {"type": "boolean", "default": True,
-                            "description": "按画面建议从免费素材源（Wikimedia/Archive.org/NASA 等）抓真实影像；关闭则纯文字画面"},
+                            "description": "按画面建议检索实拍素材（配了 PEXELS_API_KEY 走策展库，否则走公共档案馆）；关闭则纯文字画面"},
+            "ai_fallback": {"type": "string", "enum": ["off", "image", "video"], "default": "off",
+                            "description": "素材检索没命中时用 AI 生成兜底。会产生费用：图像约 $0.04/张，视频 $0.5–2/段。off 时退回文字画面"},
+            "budget_usd": {"type": "number",
+                           "description": "AI 生成的总花费上限（美元）。超出后不再生成，改用文字画面"},
             "voice_model": {"type": "string", "description": "Piper 音色，留空按脚本语言自动选择"},
             "output_path": {"type": "string"},
         },
@@ -366,10 +436,25 @@ class ZeroKeyVideo(BaseTool):
         # ---- 3. 抓真实素材（免费源，无需密钥）----
         scenes = [s.as_dict() for s in brief.scenes][: len(durations)]
         footage: list[Optional[dict[str, str]]] = []
+        ai_mode = str(inputs.get("ai_fallback") or "off").lower()
+        budget = inputs.get("budget_usd")
+        budget_left = float(budget) if budget not in (None, "") else None
+        spent_total = 0.0
+        ai_count = 0
+
         if inputs.get("use_footage", True):
             for i, sc in enumerate(scenes):
                 query = (sc.get("visual") or sc.get("narration") or "").strip()
-                footage.append(fetch_footage(query, public_dir, i + 1))
+                shot = fetch_footage(query, public_dir, i + 1)
+                # 素材库没命中才动用 AI 生成 —— 检索免费，生成要花钱。
+                if shot is None and ai_mode in ("image", "video"):
+                    shot, spent = generate_shot(query, public_dir, i + 1, ai_mode, budget_left)
+                    if shot:
+                        ai_count += 1
+                        spent_total += spent
+                        if budget_left is not None:
+                            budget_left = max(budget_left - spent, 0.0)
+                footage.append(shot)
         else:
             footage = [None] * len(scenes)
         credits = build_credits(footage)
@@ -419,16 +504,21 @@ class ZeroKeyVideo(BaseTool):
                 "voice_model": Path(model).stem,
                 "footage_used": sum(1 for f in footage if f),
                 "footage_sources": sorted({f["source"] for f in footage if f}),
+                "ai_generated": ai_count,
                 "credits": credits,
             },
             artifacts=[str(out_path)],
+            cost_usd=round(spent_total, 4),
             duration_seconds=round(time.time() - started, 1),
         )
 
 
 def register() -> None:
-    """把本地工具挂进 registry —— 它不在 tools/ 包里，不会被自动发现。"""
+    """把本地工具挂进 registry —— 它们不在 tools/ 包里，不会被自动发现。"""
     from tools.tool_registry import registry
+    from studio.gemini_image import GeminiImage
+
     registry.ensure_discovered()
-    if registry.get(ZeroKeyVideo.name) is None:
-        registry.register(ZeroKeyVideo())
+    for cls in (ZeroKeyVideo, GeminiImage):
+        if registry.get(cls.name) is None:
+            registry.register(cls())
