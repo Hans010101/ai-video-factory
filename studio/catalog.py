@@ -137,6 +137,8 @@ def _describe(tool: Any) -> dict[str, Any]:
 @lru_cache(maxsize=1)
 def _catalog_cached() -> tuple[dict[str, Any], ...]:
     registry.ensure_discovered()
+    from studio.produce import register as _register_local
+    _register_local()
     items = []
     for name in sorted(registry.list_all()):
         tool = registry.get(name)

@@ -141,6 +141,8 @@ class JobQueue:
 
         try:
             registry.ensure_discovered()
+            from studio.produce import register as _register_local
+            _register_local()
             tool = registry.get(job.tool)
             if tool is None:
                 raise ValueError(f"工具不存在: {job.tool}")

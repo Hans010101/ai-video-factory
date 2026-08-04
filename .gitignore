@@ -104,3 +104,4 @@ projects/studio/
 
 # 云端访问令牌（本地保存，勿提交）
 .avf-token
+remotion-composer/public/studio/

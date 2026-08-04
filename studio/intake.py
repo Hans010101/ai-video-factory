@@ -194,6 +194,8 @@ def _available_by_capability(capability: str) -> list:
     提供商，选型逻辑由本模块的评分承担。
     """
     registry.ensure_discovered()
+    from studio.produce import register as _register_local
+    _register_local()
     out = []
     for name in registry.list_all():
         tool = registry.get(name)
