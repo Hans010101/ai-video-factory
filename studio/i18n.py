@@ -127,6 +127,7 @@ TOOL_NAMES: dict[str, str] = {
     "remotion_caption_burn": "Remotion 字幕烧录",
     "subtitle_gen": "字幕生成",
     # 其他
+    "zero_key_video": "一键成片（脚本直出）",
     "export_bundle": "成片打包导出",
     "video_downloader": "视频下载",
 }

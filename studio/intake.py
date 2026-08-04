@@ -49,6 +49,7 @@ class Brief:
     scenes: list[Scene] = field(default_factory=list)
     style: str = ""
     raw_chars: int = 0
+    raw_text: str = ""     # 原始脚本 —— 一键成片要把它整段交给合成工具
 
     @property
     def narration_text(self) -> str:
@@ -110,7 +111,7 @@ def parse_brief(text: str) -> Brief:
       3. 完全无标记 —— 按空行分段，每段视为一条旁白
     """
     lines = [ln.rstrip() for ln in (text or "").replace("\r\n", "\n").split("\n")]
-    brief = Brief(raw_chars=len(text or ""))
+    brief = Brief(raw_chars=len(text or ""), raw_text=text or "")
 
     # 标题：第一条非空行，若像 markdown 标题或很短则采用
     for ln in lines:
@@ -267,13 +268,30 @@ def _pick(capability: str, prompt: str, budget: Optional[float] = None,
     }
 
 
+def _one_shot_available() -> bool:
+    """一键成片工具是否可用。"""
+    registry.ensure_discovered()
+    from studio.produce import register as _register_local
+    _register_local()
+    tool = registry.get("zero_key_video")
+    return tool is not None and tool.get_status().value in ("available", "degraded")
+
+
 def build_plan(brief: Brief, budget: Optional[float] = None,
                want_subtitle: bool = True) -> dict[str, Any]:
-    """根据分镜表推断需要哪些能力，并编排成工序链。"""
+    """根据分镜表推断需要哪些能力，并编排成工序链。
+
+    优先走「一键成片」：zero_key_video 内部已经把配音 → 素材 → 排布 →
+    拼接 → 渲染串成一条链，产出的是成片 MP4。逐个工具下发只能得到零散
+    素材，字幕和合成还得人工再触发一次，对「贴脚本就要片子」的用法不合适。
+    """
     prompt = " ".join(filter(None, [brief.title, brief.style,
                                     " ".join(s.visual for s in brief.scenes)]))[:900]
     has_narration = any(s.narration for s in brief.scenes)
     has_visual = any(s.visual for s in brief.scenes)
+
+    if _one_shot_available():
+        return _build_oneshot_plan(brief, has_narration, has_visual)
 
     stages: list[dict[str, Any]] = []
 
@@ -319,6 +337,63 @@ def build_plan(brief: Brief, budget: Optional[float] = None,
     }
 
 
+def _footage_provider() -> tuple[str, str]:
+    """看素材从哪来 —— 有 Pexels 密钥就是策展库，否则是公共档案馆。"""
+    try:
+        from tools.video.stock_sources import available_sources
+        names = {getattr(s, "name", "") for s in available_sources()}
+    except Exception:
+        names = set()
+    if "pexels" in names:
+        return "Pexels 策展素材库", "画面质量高、匹配准"
+    if names:
+        return "公共档案馆（" + "、".join(sorted(names)[:3]) + " 等）", \
+               "免费但为关键词匹配，命中质量参差；配 PEXELS_API_KEY 可显著改善"
+    return "无可用素材源", "将退回纯文字动画画面"
+
+
+def _build_oneshot_plan(brief: Brief, has_narration: bool, has_visual: bool) -> dict[str, Any]:
+    """一键成片：工序链只做展示，实际下发一个合成任务。"""
+    scene_n = len(brief.scenes)
+    narr_n = sum(1 for s in brief.scenes if s.narration)
+    vis_n = sum(1 for s in brief.scenes if s.visual)
+    src_name, src_note = _footage_provider()
+
+    # 这些是 zero_key_video 内部会依次做的事，列出来是为了让你看清链路，
+    # 它们不会各自入队 —— 全部在同一个任务里完成。
+    inner = [
+        {"stage": "配音", "tool": "piper_tts", "tool_label": i18n.tool_name("piper_tts"),
+         "available": True, "reason": "本地离线，按脚本语言自动选中英文音色",
+         "detail": f"{narr_n} 条旁白逐镜生成", "job_count": 0, "dispatchable": False,
+         "candidates": []},
+        {"stage": "画面素材", "tool": "", "tool_label": src_name,
+         "available": bool(has_visual), "reason": src_note,
+         "detail": f"按 {vis_n} 条画面建议检索并下载实拍素材" if has_visual
+                   else "脚本没有画面建议，将使用文字动画画面",
+         "job_count": 0, "dispatchable": False, "candidates": []},
+        {"stage": "排布与拼接", "tool": "ffmpeg", "tool_label": "FFmpeg",
+         "available": True, "reason": "按每镜旁白的真实时长排布，声画自动对齐",
+         "detail": "拼接旁白音轨、计算每镜时长", "job_count": 0,
+         "dispatchable": False, "candidates": []},
+        {"stage": "渲染成片", "tool": "zero_key_video",
+         "tool_label": i18n.tool_name("zero_key_video") or "零密钥出片",
+         "available": True, "reason": "Remotion 渲染 1920×1080 H.264 + AAC",
+         "detail": "旁白文字叠加、片尾素材署名、输出 MP4", "job_count": 1,
+         "dispatchable": True, "candidates": []},
+    ]
+
+    return {
+        "brief": brief.as_dict(),
+        "stages": inner,
+        "runnable": scene_n > 0,
+        "blocked_stages": [],
+        "total_jobs": 1,
+        "deferred_stages": [],
+        "oneshot": True,
+        "note": f"共 {scene_n} 个分镜，一个任务直接产出成片",
+    }
+
+
 def plan_to_jobs(brief: Brief, plan: dict[str, Any]) -> list[dict[str, Any]]:
     """把工序链展开成具体的任务列表（tool + inputs）。
 
@@ -326,6 +401,14 @@ def plan_to_jobs(brief: Brief, plan: dict[str, Any]) -> list[dict[str, Any]]:
     依赖前序产物的真实路径，留给用户在队列里看到产物后再触发。
     """
     jobs: list[dict[str, Any]] = []
+
+    if plan.get("oneshot"):
+        return [{
+            "tool": "zero_key_video",
+            "label": (brief.title or "成片") + f" · {len(brief.scenes)} 镜",
+            "inputs": {"brief": brief.raw_text, "title": brief.title},
+        }]
+
     by_stage = {s["stage"]: s for s in plan["stages"]}
 
     tts = by_stage.get("配音")
