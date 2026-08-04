@@ -1,0 +1,10 @@
+{
+  // AI 视频工厂 — 项目主页 / 文档站
+  // 仅托管 web/ 下的静态站点；视频渲染引擎（Python + FFmpeg + Remotion）在本地运行。
+  "name": "ai-video-factory",
+  "compatibility_date": "2026-08-01",
+  "assets": {
+    "directory": "./web",
+    "not_found_handling": "404-page"
+  }
+}
