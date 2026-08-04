@@ -100,3 +100,4 @@ venv/
 
 # 本地渲染产物与环境
 projects/demos/renders/
+projects/studio/

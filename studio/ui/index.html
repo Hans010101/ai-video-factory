@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI 视频工厂 · 工作台</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎬</text></svg>">
+<link rel="stylesheet" href="/ui/app.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand"><span class="mark">🎬</span>AI 视频工厂<em>工作台</em></div>
+  <nav class="tabs" id="tabs">
+    <button data-tab="produce" class="on">生产</button>
+    <button data-tab="queue">队列 <span class="pill" id="pillQueue">0</span></button>
+    <button data-tab="outputs">成片库</button>
+    <button data-tab="tools">工具库 <span class="pill" id="pillTools">–</span></button>
+    <button data-tab="keys">密钥</button>
+    <button data-tab="doctor">环境</button>
+  </nav>
+  <div class="status" id="conn"><span class="dot"></span>连接中</div>
+</header>
+
+<main>
+  <!-- ============ 生产 ============ -->
+  <section id="tab-produce" class="tab on">
+    <div class="split">
+      <aside class="picker">
+        <input type="search" id="toolSearch" placeholder="搜索工具… (102 个)" autocomplete="off">
+        <div id="capList" class="caplist"></div>
+      </aside>
+
+      <div class="workspace" id="workspace">
+        <div class="empty">
+          <h2>选择一个工具开始生产</h2>
+          <p>左侧按能力分类列出全部工具。表单会根据该工具的输入 schema 自动生成，支持单次执行与批量队列。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 队列 ============ -->
+  <section id="tab-queue" class="tab">
+    <div class="bar">
+      <div class="stats" id="queueStats"></div>
+      <button class="btn ghost sm" onclick="loadJobs()">刷新</button>
+    </div>
+    <div id="jobList" class="joblist"></div>
+  </section>
+
+  <!-- ============ 成片库 ============ -->
+  <section id="tab-outputs" class="tab">
+    <div class="bar">
+      <div class="stats" id="outStats"></div>
+      <button class="btn ghost sm" onclick="loadOutputs()">刷新</button>
+    </div>
+    <div id="outGrid" class="outgrid"></div>
+  </section>
+
+  <!-- ============ 工具库 ============ -->
+  <section id="tab-tools" class="tab">
+    <div class="bar">
+      <div class="stats" id="toolStats"></div>
+      <input type="search" id="allToolSearch" class="inp sm" placeholder="筛选工具/提供商/能力…">
+      <label class="chk"><input type="checkbox" id="onlyBlocked"> 只看待解锁</label>
+    </div>
+    <div id="allTools" class="toolgrid"></div>
+  </section>
+
+  <!-- ============ 密钥 ============ -->
+  <section id="tab-keys" class="tab">
+    <div class="notice">
+      密钥写入本机 <code>.env</code>，只保存在你自己的电脑上。已保存的值不会回传浏览器，界面只显示掩码。
+      留空并保存即可清除该密钥。
+    </div>
+    <div class="bar"><div class="stats" id="keyStats"></div>
+      <button class="btn sm" onclick="saveKeys()">保存全部修改</button></div>
+    <div id="keyList" class="keylist"></div>
+  </section>
+
+  <!-- ============ 环境 ============ -->
+  <section id="tab-doctor" class="tab">
+    <div class="bar"><div class="stats">本地依赖体检</div>
+      <button class="btn ghost sm" onclick="loadDoctor()">重新检测</button></div>
+    <div id="doctorBody"></div>
+  </section>
+</main>
+
+<div id="toast" class="toast"></div>
+<script src="/ui/app.js"></script>
+</body>
+</html>
