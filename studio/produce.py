@@ -89,11 +89,17 @@ def _concat_audio(parts: list[Path], out_path: Path) -> float:
     return _probe_duration(out_path)
 
 
-def fetch_footage(query: str, out_dir: Path, index: int) -> Optional[str]:
-    """从免费素材源找一段真实影像并下载。
+MEDIA_SUFFIXES = (".mp4", ".mov", ".webm", ".mkv", ".jpg", ".jpeg", ".png", ".webp")
 
-    只用不需要 API 密钥的源（Wikimedia Commons、Archive.org、NASA、
-    国会图书馆等）。找不到就返回 None，由调用方退回文字画面。
+
+def fetch_footage(query: str, out_dir: Path, index: int) -> Optional[dict[str, str]]:
+    """从素材源找一段真实影像并下载，连同署名信息一起返回。
+
+    优先用已配置密钥的策展库（Pexels 等），没有就退回免费公共档案
+    （Wikimedia Commons、Archive.org、NASA、国会图书馆）。档案馆是关键词
+    匹配，命中质量参差，这是源本身的特性，不是选型问题。
+
+    返回 {"file", "source", "creator", "license", "url"}；找不到返回 None。
     """
     if not query.strip():
         return None
@@ -111,22 +117,52 @@ def fetch_footage(query: str, out_dir: Path, index: int) -> Optional[str]:
             continue
         for cand in (hits or [])[:3]:
             try:
-                suffix = Path(str(getattr(cand, "url", "") or "")).suffix.lower()
-                if suffix not in (".mp4", ".mov", ".webm", ".jpg", ".jpeg", ".png", ".webp"):
-                    suffix = ".mp4"
+                # 字段是 download_url，不是 url —— 取错会让图片素材被存成
+                # .mp4，Remotion 按视频解析后直接失败。
+                suffix = Path(str(getattr(cand, "download_url", "") or "").split("?")[0]).suffix.lower()
+                if suffix not in MEDIA_SUFFIXES:
+                    suffix = ".jpg" if getattr(cand, "kind", "") == "image" else ".mp4"
                 target = out_dir / f"shot_{index:03d}{suffix}"
                 got = source.download(cand, target)
                 path = Path(got or target)
                 if path.exists() and path.stat().st_size > 20_000:
-                    return path.name
+                    return {
+                        "file": path.name,
+                        "source": getattr(cand, "source", "") or getattr(source, "name", ""),
+                        "creator": getattr(cand, "creator", "") or "",
+                        "license": getattr(cand, "license", "") or "",
+                        "url": getattr(cand, "source_url", "") or "",
+                    }
             except Exception:
                 continue
     return None
 
 
+def build_credits(shots: list[Optional[dict[str, str]]]) -> str:
+    """生成片尾署名文案。
+
+    素材站的使用条款普遍要求署名并回链，这里把用到的每一条素材的来源与
+    作者列出来，避免「用了但没标」。
+    """
+    lines: list[str] = []
+    seen: set[str] = set()
+    for shot in shots:
+        if not shot:
+            continue
+        who = shot.get("creator") or "—"
+        src = (shot.get("source") or "").replace("_", " ").title()
+        key = f"{src}|{who}"
+        if key in seen:
+            continue
+        seen.add(key)
+        lines.append(f"{src} · {who}")
+    return "素材来源：" + "；".join(lines) if lines else ""
+
+
 def build_cuts(scenes: list[dict[str, Any]], durations: list[float],
                title: str, theme: dict[str, str],
-               footage: Optional[list[Optional[str]]] = None) -> list[dict[str, Any]]:
+               footage: Optional[list[Optional[dict[str, str]]]] = None,
+               credits: str = "") -> list[dict[str, Any]]:
     """按每镜旁白的真实时长排布画面，画面与声音自然对齐。"""
     cuts: list[dict[str, Any]] = []
     t = 0.0
@@ -159,7 +195,7 @@ def build_cuts(scenes: list[dict[str, Any]], durations: list[float],
         if shot:
             # 有真实素材时用它当画面，旁白文字走 overlay 叠在上面。
             # 注意：组件的类型判断在 source 之前，设了文字类型就不会渲染素材。
-            cut["source"] = f"studio/{shot}"
+            cut["source"] = f"studio/{shot['file']}"
             cut["source_in_seconds"] = 0
         else:
             # 没找到素材才退回文字画面。text_card 只渲染 text，
@@ -172,10 +208,13 @@ def build_cuts(scenes: list[dict[str, Any]], durations: list[float],
         t += span
 
     if cuts:
+        # 用了外部素材就必须署名 —— 素材站条款普遍要求，也是申请 API 时的承诺。
+        tail_span = 3.2 if credits else TAIL_SECONDS
         cuts.append({
             "id": "tail", "type": "text_card", "source": "",
-            "in_seconds": round(t, 3), "out_seconds": round(t + TAIL_SECONDS, 3),
-            "text": "", "subtitle": "",
+            "in_seconds": round(t, 3), "out_seconds": round(t + tail_span, 3),
+            "text": credits, "subtitle": "",
+            "fontSize": 34 if credits else None,
             "backgroundColor": theme["bg"], "color": theme["fg"],
         })
     return cuts
@@ -326,16 +365,18 @@ class ZeroKeyVideo(BaseTool):
 
         # ---- 3. 抓真实素材（免费源，无需密钥）----
         scenes = [s.as_dict() for s in brief.scenes][: len(durations)]
-        footage: list[Optional[str]] = []
+        footage: list[Optional[dict[str, str]]] = []
         if inputs.get("use_footage", True):
             for i, sc in enumerate(scenes):
                 query = (sc.get("visual") or sc.get("narration") or "").strip()
                 footage.append(fetch_footage(query, public_dir, i + 1))
         else:
             footage = [None] * len(scenes)
+        credits = build_credits(footage)
 
         # ---- 4. 构造 Remotion props ----
-        cuts = build_cuts(scenes, durations, inputs.get("title") or brief.title, theme, footage)
+        cuts = build_cuts(scenes, durations, inputs.get("title") or brief.title,
+                          theme, footage, credits)
         overlays = build_overlays(cuts, scenes, theme)
         # 旁白从片头之后开始，和画面对齐
         props = {
@@ -376,6 +417,9 @@ class ZeroKeyVideo(BaseTool):
                 "narration_seconds": round(total_audio, 2),
                 "video_seconds": round(cuts[-1]["out_seconds"], 2) if cuts else 0,
                 "voice_model": Path(model).stem,
+                "footage_used": sum(1 for f in footage if f),
+                "footage_sources": sorted({f["source"] for f in footage if f}),
+                "credits": credits,
             },
             artifacts=[str(out_path)],
             duration_seconds=round(time.time() - started, 1),
