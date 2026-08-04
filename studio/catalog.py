@@ -80,7 +80,12 @@ def _describe(tool: Any) -> dict[str, Any]:
         dependency_ok = False
         blocked_reason = str(exc).split("\n")[0]
 
-    available = tool.get_status().value == "available"
+    # DEGRADED means "runs with reduced capability" (e.g. face_tracker with
+    # OpenCV but no MediaPipe) — it is runnable, so treat it as usable and
+    # flag it, rather than hiding it alongside genuinely blocked tools.
+    status = tool.get_status().value
+    degraded = status == "degraded"
+    available = status in ("available", "degraded")
 
     # Keys that would plausibly unlock this tool.
     needs_keys: list[str] = list(declared_env)
@@ -90,11 +95,22 @@ def _describe(tool: Any) -> dict[str, Any]:
         if needs_keys and not blocked_reason:
             blocked_reason = "需要 API 密钥：" + "、".join(needs_keys)
     if not available and not blocked_reason:
-        blocked_reason = "依赖未满足"
+        # check_dependencies() passed and no key was found in source, so the
+        # tool overrides get_status() with its own logic — most often a
+        # selector with no usable provider, or a local model / external
+        # service (ComfyUI, local diffusion weights) that isn't set up.
+        blocked_reason = (
+            "该工具自行判定不可用：通常是「选择器」类工具尚无任何可用提供商，"
+            "或需要本地模型权重 / 外部服务（如 ComfyUI）。配好任一提供商密钥后会自动恢复。"
+        )
+    if degraded:
+        blocked_reason = "降级可用：部分依赖或数据源缺失，核心功能仍可运行。"
 
     return {
         "name": tool.name,
         "version": tool.version,
+        "status": status,
+        "degraded": degraded,
         "capability": tool.capability,
         "capability_label": CAPABILITY_LABELS.get(tool.capability, tool.capability),
         "provider": tool.provider,
@@ -134,6 +150,7 @@ def _catalog_cached() -> tuple[dict[str, Any], ...]:
                 "best_for": [], "not_good_for": [], "capabilities": [],
                 "tier": "core", "runtime": "local", "stability": "experimental",
                 "execution_mode": "sync", "version": "?", "cost_hint": "local",
+                "status": "unavailable", "degraded": False,
             })
     return tuple(items)
 
@@ -168,7 +185,9 @@ def summary(refresh: bool = False) -> dict[str, Any]:
     return {
         "total": len(items),
         "available": sum(1 for i in items if i["available"]),
+        "degraded": sum(1 for i in items if i.get("degraded")),
         "blocked": sum(1 for i in items if not i["available"]),
+        "needs_key": sum(1 for i in items if not i["available"] and i["needs_keys"]),
         "capabilities": sorted(by_capability.values(), key=lambda b: -b["total"]),
         "key_unlocks": sorted(
             ({"key": k, "unlocks": sorted(v), "count": len(v)} for k, v in key_unlocks.items()),

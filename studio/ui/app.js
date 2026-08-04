@@ -58,7 +58,7 @@ function renderPicker(filter = '') {
     return `<details class="capgroup" ${q || avail ? 'open' : ''}>
       <summary>${esc(cap)}<span class="n">${avail}/${items.length}</span></summary>
       <div class="items">${items.map(t => `
-        <button class="titem ${t.available ? '' : 'blocked'} ${S.current === t.name ? 'on' : ''}"
+        <button class="titem ${t.available ? '' : 'blocked'} ${t.degraded ? 'degraded' : ''} ${S.current === t.name ? 'on' : ''}"
                 data-tool="${esc(t.name)}" title="${esc(t.blocked_reason || t.name)}">
           <span class="s"></span><span class="nm">${esc(t.name)}</span>
         </button>`).join('')}</div></details>`;
@@ -88,11 +88,14 @@ function selectTool(name) {
         <h2>${esc(t.name)}</h2>
         <div class="meta">${esc(t.provider)} · ${esc(t.capability_label)} · ${esc(t.runtime)} · v${esc(t.version)}</div>
         <div class="tagline">
-          ${t.available ? '<span class="tg ok">✓ 可用</span>' : '<span class="tg no">待解锁</span>'}
+          ${t.degraded ? '<span class="tg warn">◐ 降级可用</span>'
+            : t.available ? '<span class="tg ok">✓ 可用</span>' : '<span class="tg no">待解锁</span>'}
           ${t.best_for.slice(0, 2).map(b => `<span class="tg">${esc(b)}</span>`).join('')}
         </div>
       </div>
     </div>
+    ${t.degraded ? `<div class="blockbox"><b>降级可用</b>${esc(t.blocked_reason)}
+      ${t.install_instructions ? `<br><span style="font-size:.82rem;opacity:.85">补齐依赖可获得完整能力：${esc(t.install_instructions.split('\n')[0])}</span>` : ''}</div>` : ''}
     ${t.available ? '' : `<div class="blockbox"><b>此工具当前不可用</b>${esc(t.blocked_reason)}
       ${t.needs_keys.length ? `<br>到「密钥」页填入 <code>${t.needs_keys.map(esc).join('</code> 或 <code>')}</code> 即可解锁。` : ''}
       ${t.install_instructions ? `<br><span style="font-size:.82rem;opacity:.85">${esc(t.install_instructions.split('\n')[0])}</span>` : ''}</div>`}
@@ -305,18 +308,20 @@ async function loadOutputs() {
 function renderAllTools() {
   if (!S.summary) return;
   const s = S.summary;
-  $('#toolStats').innerHTML = `<span>共 <b>${s.total}</b></span><span>可用 <b>${s.available}</b></span><span>待解锁 <b>${s.blocked}</b></span>`;
+  $('#toolStats').innerHTML = `<span>共 <b>${s.total}</b></span><span>可用 <b>${s.available}</b></span>`
+    + (s.degraded ? `<span>其中降级 <b>${s.degraded}</b></span>` : '')
+    + `<span>待解锁 <b>${s.blocked}</b></span><span>需密钥 <b>${s.needs_key ?? '–'}</b></span>`;
   const q = ($('#allToolSearch').value || '').trim().toLowerCase();
   const onlyBlocked = $('#onlyBlocked').checked;
   const list = S.tools.filter(t =>
     (!onlyBlocked || !t.available) &&
     (!q || `${t.name} ${t.provider} ${t.capability_label}`.toLowerCase().includes(q)));
   $('#allTools').innerHTML = list.map(t => `
-    <div class="tcard ${t.available ? '' : 'blocked'}">
+    <div class="tcard ${t.available ? '' : 'blocked'} ${t.degraded ? 'degraded' : ''}">
       <h4><span class="s"></span>${esc(t.name)}</h4>
       <div class="p">${esc(t.provider)} · ${esc(t.capability_label)} · ${esc(t.runtime)}</div>
       ${t.best_for.length ? `<div class="bf">${esc(t.best_for[0])}</div>` : ''}
-      ${t.available ? '' : `<div class="why">${esc(t.blocked_reason).slice(0, 160)}</div>`}
+      ${t.available && !t.degraded ? '' : `<div class="why">${esc(t.blocked_reason).slice(0, 160)}</div>`}
     </div>`).join('') || '<p style="color:var(--ink-3)">无匹配</p>';
 }
 $('#allToolSearch').addEventListener('input', renderAllTools);
