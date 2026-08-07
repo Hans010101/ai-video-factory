@@ -20,6 +20,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Optional
 
@@ -92,7 +93,8 @@ def _concat_audio(parts: list[Path], out_path: Path) -> float:
 MEDIA_SUFFIXES = (".mp4", ".mov", ".webm", ".mkv", ".jpg", ".jpeg", ".png", ".webp")
 
 
-def fetch_footage(query: str, out_dir: Path, index: int) -> Optional[dict[str, str]]:
+def fetch_footage(query: str, out_dir: Path, index: int,
+                  prefix: str = "shot") -> Optional[dict[str, str]]:
     """从素材源找一段真实影像并下载，连同署名信息一起返回。
 
     优先用已配置密钥的策展库（Pexels 等），没有就退回免费公共档案
@@ -122,7 +124,7 @@ def fetch_footage(query: str, out_dir: Path, index: int) -> Optional[dict[str, s
                 suffix = Path(str(getattr(cand, "download_url", "") or "").split("?")[0]).suffix.lower()
                 if suffix not in MEDIA_SUFFIXES:
                     suffix = ".jpg" if getattr(cand, "kind", "") == "image" else ".mp4"
-                target = out_dir / f"shot_{index:03d}{suffix}"
+                target = out_dir / f"{prefix}_{index:03d}{suffix}"
                 got = source.download(cand, target)
                 path = Path(got or target)
                 if path.exists() and path.stat().st_size > 20_000:
@@ -149,7 +151,8 @@ AI_FALLBACK_TOOLS = {
 
 
 def generate_shot(query: str, out_dir: Path, index: int, kind: str,
-                  budget_left: Optional[float]) -> tuple[Optional[dict[str, str]], float]:
+                  budget_left: Optional[float],
+                  prefix: str = "shot") -> tuple[Optional[dict[str, str]], float]:
     """素材源没命中时，用 AI 生成一张图或一段视频顶上。
 
     返回 (shot, 实际花费)。预算不够或没有可用生成器时返回 (None, 0.0)，
@@ -167,7 +170,7 @@ def generate_shot(query: str, out_dir: Path, index: int, kind: str,
             continue
 
         inputs: dict[str, Any] = {"prompt": query,
-                                  "output_path": str(out_dir / f"shot_{index:03d}{suffix}")}
+                                  "output_path": str(out_dir / f"{prefix}_{index:03d}{suffix}")}
         try:
             estimate = float(tool.estimate_cost(inputs) or 0.0)
         except Exception:
@@ -429,7 +432,11 @@ class ZeroKeyVideo(BaseTool):
         # Remotion 的资源下载器会直接失败。
         public_dir = COMPOSER_DIR / "public" / "studio"
         public_dir.mkdir(parents=True, exist_ok=True)
-        narration = public_dir / f"{out_path.stem}_narration.wav"
+        # 每次出片用独立前缀：public/ 是所有并发任务共享的目录，固定用
+        # shot_001 这种名字会让同时跑的任务互相覆盖，而且上一轮遗留的
+        # 同名不同扩展名文件（.png / .mp4）也会污染这一轮。
+        run_id = f"{out_path.stem}_{uuid.uuid4().hex[:8]}"
+        narration = public_dir / f"{run_id}_narration.wav"
         total_audio = _concat_audio(wavs, narration)
         narration_src = f"studio/{narration.name}"
 
@@ -445,10 +452,11 @@ class ZeroKeyVideo(BaseTool):
         if inputs.get("use_footage", True):
             for i, sc in enumerate(scenes):
                 query = (sc.get("visual") or sc.get("narration") or "").strip()
-                shot = fetch_footage(query, public_dir, i + 1)
+                shot = fetch_footage(query, public_dir, i + 1, run_id)
                 # 素材库没命中才动用 AI 生成 —— 检索免费，生成要花钱。
                 if shot is None and ai_mode in ("image", "video"):
-                    shot, spent = generate_shot(query, public_dir, i + 1, ai_mode, budget_left)
+                    shot, spent = generate_shot(query, public_dir, i + 1, ai_mode,
+                                                budget_left, run_id)
                     if shot:
                         ai_count += 1
                         spent_total += spent
@@ -493,6 +501,14 @@ class ZeroKeyVideo(BaseTool):
         if proc.returncode != 0 or not out_path.exists():
             tail = (proc.stderr or proc.stdout or "")[-600:]
             return ToolResult(success=False, error=f"Remotion 渲染失败：{tail}")
+
+        # 成片已落盘，清掉本次的中间素材 —— public/ 会被打进每次渲染的
+        # webpack bundle，堆积几十 MB 的旧素材会让后续渲染越来越慢。
+        for leftover in public_dir.glob(f"{run_id}*"):
+            try:
+                leftover.unlink()
+            except OSError:
+                pass
 
         return ToolResult(
             success=True,
