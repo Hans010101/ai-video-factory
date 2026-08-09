@@ -467,20 +467,70 @@ $('#allToolSearch').addEventListener('input', renderAllTools);
 $('#onlyBlocked').addEventListener('change', renderAllTools);
 
 /* ---------------- keys ---------------- */
+const VSTATE = {
+  ok:      { cls: 'vok',   icon: '✅', text: '已验证可用' },
+  warn:    { cls: 'vwarn', icon: '⚠️', text: '有问题' },
+  bad:     { cls: 'vbad',  icon: '❌', text: '不可用' },
+  unknown: { cls: 'vunk',  icon: '❓', text: '未验证' },
+};
+
 async function loadKeys() {
   const d = await api('/api/keys');
   S.keys = d.keys;
-  const setN = d.keys.filter(k => k.set).length;
-  $('#keyStats').innerHTML = `<span>已配置 <b>${setN}</b> / ${d.keys.length}</span>`;
-  $('#keyList').innerHTML = d.keys.map(k => `
-    <div class="key ${k.set ? 'set' : ''}">
+  renderKeys();
+  // 进页面就自动验证已填的密钥 —— 光标绿色不代表能用，
+  // 用户踩过的坑全是「填了但不能用」。
+  verifyKeys(true);
+}
+
+function renderKeys() {
+  const keys = S.keys;
+  const setN = keys.filter(k => k.set).length;
+  const v = S.verify || {};
+  const okN = keys.filter(k => v[k.key] && v[k.key].state === 'ok').length;
+  const badN = keys.filter(k => v[k.key] && ['bad', 'warn'].includes(v[k.key].state)).length;
+  $('#keyStats').innerHTML =
+    `<span>已配置 <b>${setN}</b> / ${keys.length}</span>`
+    + (okN ? `<span style="color:var(--ok)">已验证可用 <b>${okN}</b></span>` : '')
+    + (badN ? `<span style="color:var(--err)">需处理 <b>${badN}</b></span>` : '');
+
+  $('#keyList').innerHTML = keys.map(k => {
+    const r = v[k.key];
+    const st = k.set ? VSTATE[(r && r.state) || 'unknown'] : null;
+    return `
+    <div class="key ${k.set ? 'set' : ''} ${st ? st.cls : ''}">
       <div class="kh"><span class="kn">${esc(k.key)}</span>
+        ${st ? `<span class="vbadge ${st.cls}">${st.icon} ${st.text}</span>` : '<span class="vbadge vnone">未配置</span>'}
         ${k.tier ? `<span class="kt ${/免费|完全免费/.test(k.tier) ? 'free' : ''}">${esc(k.tier)}</span>` : ''}</div>
       ${k.label ? `<div class="kl">${esc(k.label)}${k.url ? ` · <a href="${esc(k.url)}" target="_blank" rel="noopener">申请</a>` : ''}</div>` : ''}
       <input class="inp" data-key="${esc(k.key)}" type="password" autocomplete="off"
         placeholder="${k.set ? k.masked + '（留空保持不变）' : '粘贴密钥…'}">
+      ${r && r.detail && k.set ? `<div class="vdetail ${st.cls}">${esc(r.detail)}</div>` : ''}
       ${k.unlock_count ? `<div class="ku">可解锁 ${k.unlock_count} 个工具：${esc(k.unlocks.slice(0, 4).join(', '))}${k.unlocks.length > 4 ? '…' : ''}</div>` : ''}
-    </div>`).join('');
+    </div>`;
+  }).join('');
+}
+
+async function verifyKeys(silent) {
+  const btn = $('#verifyBtn');
+  if (btn) { btn.disabled = true; btn.textContent = '验证中…'; }
+  try {
+    const d = await api('/api/keys/verify', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ updates: {} }),
+    });
+    S.verify = {};
+    d.results.forEach(r => { S.verify[r.key] = r; });
+    renderKeys();
+    if (!silent) {
+      const bad = d.results.filter(r => ['bad', 'warn'].includes(r.state));
+      toast(bad.length ? `${bad.length} 个密钥有问题，见卡片说明` : '全部密钥验证通过', bad.length > 0);
+    }
+  } catch (e) {
+    if (!silent) toast('验证失败: ' + e.message, true);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '重新验证'; }
+  }
 }
 
 async function saveKeys() {

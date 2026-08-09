@@ -203,6 +203,23 @@ textarea{font-family:var(--mono);font-size:.83rem;line-height:1.65;resize:vertic
 .key .kl{font-size:.8rem;color:var(--ink-2);margin-bottom:9px}
 .key .ku{font-size:.75rem;color:var(--red-deep);margin-top:7px}
 
+/* 密钥验证状态 —— 「填了」和「能用」必须一眼分得开 */
+.vbadge{font-size:.7rem;font-weight:700;padding:2px 9px;border-radius:20px;white-space:nowrap}
+.vbadge.vok{background:var(--ok-bg);color:var(--ok)}
+.vbadge.vwarn{background:var(--warn-bg);color:var(--warn)}
+.vbadge.vbad{background:var(--err-bg);color:var(--err)}
+.vbadge.vunk{background:var(--bg-3);color:var(--ink-3)}
+.vbadge.vnone{background:var(--bg-3);color:var(--ink-3)}
+.vdetail{font-size:.76rem;margin-top:8px;padding:7px 10px;border-radius:6px;
+  line-height:1.55;word-break:break-word}
+.vdetail.vok{background:var(--ok-bg);color:var(--ok)}
+.vdetail.vwarn{background:var(--warn-bg);color:var(--warn)}
+.vdetail.vbad{background:var(--err-bg);color:var(--err)}
+.vdetail.vunk{display:none}
+.key.vok{border-color:#BFE3D1;background:linear-gradient(180deg,var(--ok-bg),#fff 38%)}
+.key.vwarn{border-color:#F0DCB0;background:linear-gradient(180deg,var(--warn-bg),#fff 38%)}
+.key.vbad{border-color:#F3C9C5;background:linear-gradient(180deg,var(--err-bg),#fff 38%)}
+
 /* ---------- doctor ---------- */
 .dgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:12px;margin-bottom:22px}
 .ditem{background:#fff;border:1px solid var(--line);border-radius:10px;padding:13px 15px;

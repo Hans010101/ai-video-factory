@@ -204,6 +204,13 @@ def create_app() -> FastAPI:
         unlock_map = {e["key"]: e["unlocks"] for e in s["key_unlocks"]}
         return {"keys": env_manager.status(unlock_map)}
 
+    @app.post("/api/keys/verify")
+    def verify_keys_endpoint(req: KeyRequest) -> dict[str, Any]:
+        """真正发一次请求确认密钥能用 —— 「填了」不等于「能用」。"""
+        from studio import verify_keys as vk
+        only = list(req.updates) or None
+        return {"results": vk.verify_all(env_manager.read_env(), only=only)}
+
     @app.post("/api/keys")
     def set_keys(req: KeyRequest) -> dict[str, Any]:
         result = env_manager.write_keys(req.updates)
