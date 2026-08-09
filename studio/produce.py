@@ -111,10 +111,15 @@ def fetch_footage(query: str, out_dir: Path, index: int,
     except Exception:
         return None
 
+    # 素材库的标签几乎全是英文，中文查询命中率与精准度都明显更低。
+    # 只转检索词，脚本、旁白、字幕都不受影响。
+    from studio.translate import to_english
+    search_query = to_english(query)
+
     filters = SearchFilters(per_page=6)
     for source in available_sources():
         try:
-            hits = source.search(query, filters)
+            hits = source.search(search_query, filters)
         except Exception:
             continue
         for cand in (hits or [])[:3]:
@@ -134,6 +139,7 @@ def fetch_footage(query: str, out_dir: Path, index: int,
                         "creator": getattr(cand, "creator", "") or "",
                         "license": getattr(cand, "license", "") or "",
                         "url": getattr(cand, "source_url", "") or "",
+                        "query": search_query,
                     }
             except Exception:
                 continue
@@ -521,6 +527,7 @@ class ZeroKeyVideo(BaseTool):
                 "footage_used": sum(1 for f in footage if f),
                 "footage_sources": sorted({f["source"] for f in footage if f}),
                 "ai_generated": ai_count,
+                "search_queries": [f.get("query") for f in footage if f and f.get("query")],
                 "credits": credits,
             },
             artifacts=[str(out_path)],

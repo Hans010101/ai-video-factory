@@ -38,6 +38,31 @@ _BARE_TAG = re.compile(
     + r")\s*[\]】)]?[\s　]+(.+)$",
     re.IGNORECASE,
 )
+
+# 文档里更常见的是标记独占一行、内容写在后面几行（Word 里尤其如此）。
+# 整行只有标记时不会有歧义，所以这里可以放宽到「文案」「正文」这类词。
+_SECTION_VISUAL = (
+    "画面提示词", "视觉提示词", "画面描述", "画面内容", "画面提示", "视觉提示",
+    "提示词", "画面", "视觉", "分镜画面", "image prompt", "visual prompt", "prompt",
+)
+_SECTION_NARRATION = (
+    "旁白", "配音", "解说", "解说词", "口播", "台词", "文案", "封面文案",
+    "正文", "内容", "narration", "voiceover", "script",
+)
+_SECTION_LINE = re.compile(r"^\s*[\[【(]?\s*([^\s\[\]【】()：:]+)\s*[\]】)]?\s*[:：]?\s*$")
+
+
+def _section_role(line: str) -> str:
+    """整行只有一个标记时，返回它引导的角色：narration / visual / 空。"""
+    m = _SECTION_LINE.match(line)
+    if not m:
+        return ""
+    word = m.group(1).strip().lower()
+    if word in {w.lower() for w in _SECTION_VISUAL}:
+        return "visual"
+    if word in {w.lower() for w in _SECTION_NARRATION}:
+        return "narration"
+    return ""
 # 两种常见的分镜标题写法都要认：
 #   「场景1」「镜头 2」「scene 3」   —— 关键词在前
 #   「第1镜」「第2幕」「第三段」      —— 序号在中间
@@ -158,6 +183,7 @@ def parse_brief(text: str) -> Brief:
     scenes: list[Scene] = []
     current: Optional[Scene] = None
     pending_blank = False
+    section_role = ""   # 由「画面提示词」这类独占一行的标记设置
 
     def ensure_scene() -> Scene:
         nonlocal current
@@ -183,6 +209,14 @@ def parse_brief(text: str) -> Brief:
             pending_blank = False
             continue
 
+        # 整行只有一个标记（Word 文档里最常见的写法）：它引导后面若干行，
+        # 直到下一个标记或分镜标题为止。
+        role = _section_role(stripped)
+        if role:
+            section_role = role
+            pending_blank = False
+            continue
+
         # 去掉列表符号
         lm = _LIST_HEAD.match(stripped)
         if lm:
@@ -193,13 +227,27 @@ def parse_brief(text: str) -> Brief:
             continue
 
         if tag and any(t in tag for t in _NARRATION_TAGS):
+            section_role = ""
             sc = ensure_scene()
             sc.narration = (sc.narration + " " + content).strip() if sc.narration else content
             pending_blank = False
             continue
         if tag and any(t in tag for t in _VISUAL_TAGS):
+            section_role = ""
             sc = ensure_scene()
             sc.visual = (sc.visual + " " + content).strip() if sc.visual else content
+            pending_blank = False
+            continue
+
+        # 处于某个标记段落之内：整行都归该角色
+        if section_role == "visual":
+            sc = ensure_scene()
+            sc.visual = (sc.visual + " " + content).strip() if sc.visual else content
+            pending_blank = False
+            continue
+        if section_role == "narration":
+            sc = ensure_scene()
+            sc.narration = (sc.narration + " " + content).strip() if sc.narration else content
             pending_blank = False
             continue
 
