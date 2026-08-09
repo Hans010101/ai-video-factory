@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import tempfile
@@ -92,9 +93,61 @@ def _concat_audio(parts: list[Path], out_path: Path) -> float:
 
 MEDIA_SUFFIXES = (".mp4", ".mov", ".webm", ".mkv", ".jpg", ".jpeg", ".png", ".webp")
 
+# 中文约 5.5 字/秒，英文约 2.5 词/秒。一个镜头超过十几秒不换画面就很难看，
+# 所以按这个速率把长旁白切成多个镜头。
+_CN_CHARS_PER_SEC = 5.5
+_SENTENCE_END = re.compile(r"(?<=[。！？!?；;])\s*")
+
+
+def split_long_scenes(scenes: list[dict[str, Any]],
+                      max_seconds: float = 11.0) -> list[dict[str, Any]]:
+    """把过长的旁白按句子边界切成多个镜头。
+
+    整篇文章常常只写一段旁白配一条画面建议，直接出片就是几十秒不换画面。
+    切分只在句末标点处发生，不会把句子拦腰截断；画面建议由切出的各镜共享，
+    后面检索时会取不同候选，保证画面有变化。
+    """
+    max_chars = int(max_seconds * _CN_CHARS_PER_SEC)
+    out: list[dict[str, Any]] = []
+
+    for sc in scenes:
+        narration = (sc.get("narration") or "").strip()
+        if len(narration) <= max_chars:
+            out.append(sc)
+            continue
+
+        pieces = [p.strip() for p in _SENTENCE_END.split(narration) if p.strip()]
+        chunks: list[str] = []
+        buf = ""
+        for piece in pieces:
+            # 单句本身就超长时独立成镜，不硬切
+            if not buf:
+                buf = piece
+            elif len(buf) + len(piece) <= max_chars:
+                buf = f"{buf}{piece}"
+            else:
+                chunks.append(buf)
+                buf = piece
+        if buf:
+            chunks.append(buf)
+
+        for i, chunk in enumerate(chunks):
+            out.append({
+                **sc,
+                "narration": chunk,
+                # 画面建议只保留在首镜？不 —— 每镜都要有画面，共享同一条建议，
+                # 检索时按 variant 取不同候选即可。
+                "visual": sc.get("visual") or "",
+                "_variant": i,
+            })
+
+    for i, sc in enumerate(out, 1):
+        sc["index"] = i
+    return out
+
 
 def fetch_footage(query: str, out_dir: Path, index: int,
-                  prefix: str = "shot") -> Optional[dict[str, str]]:
+                  prefix: str = "shot", variant: int = 0) -> Optional[dict[str, str]]:
     """从素材源找一段真实影像并下载，连同署名信息一起返回。
 
     优先用已配置密钥的策展库（Pexels 等），没有就退回免费公共档案
@@ -122,7 +175,12 @@ def fetch_footage(query: str, out_dir: Path, index: int,
             hits = source.search(search_query, filters)
         except Exception:
             continue
-        for cand in (hits or [])[:3]:
+        # 同一条画面建议切出的多个镜头共享检索结果，按 variant 错开取用，
+        # 否则整段都是同一个画面，等于没切。
+        pool = list(hits or [])
+        if variant and pool:
+            pool = pool[variant % len(pool):] + pool[:variant % len(pool)]
+        for cand in pool[:3]:
             try:
                 # 字段是 download_url，不是 url —— 取错会让图片素材被存成
                 # .mp4，Remotion 按视频解析后直接失败。
@@ -357,6 +415,10 @@ class ZeroKeyVideo(BaseTool):
             "brief": {"type": "string", "description": "脚本原文，支持「场景N」「旁白：」「画面：」标记"},
             "title": {"type": "string", "description": "片头标题，留空则自动取脚本首行"},
             "theme": {"type": "string", "enum": ["brand", "slate", "light"], "default": "brand"},
+            "auto_split": {"type": "boolean", "default": True,
+                           "description": "旁白过长时按句子边界自动切成多个镜头，避免几十秒不换画面"},
+            "max_shot_seconds": {"type": "number", "default": 11,
+                                 "description": "单镜最长秒数，超过就切分"},
             "use_footage": {"type": "boolean", "default": True,
                             "description": "按画面建议检索实拍素材（配了 PEXELS_API_KEY 走策展库，否则走公共档案馆）；关闭则纯文字画面"},
             "ai_fallback": {"type": "string", "enum": ["off", "image", "video"], "default": "off",
@@ -390,6 +452,13 @@ class ZeroKeyVideo(BaseTool):
         if not brief.scenes:
             return ToolResult(success=False, error="没有解析出任何分镜")
 
+        # 整篇文章常常只写成一段旁白配一条画面建议。不切分的话，几十秒的
+        # 旁白全程只有一个画面。切分必须在配音之前，配音要按切好的镜逐条生成。
+        raw_scenes = [s.as_dict() for s in brief.scenes]
+        max_shot = float(inputs.get("max_shot_seconds") or 11.0)
+        scene_dicts = (split_long_scenes(raw_scenes, max_shot)
+                       if inputs.get("auto_split", True) else raw_scenes)
+
         theme = THEMES.get(inputs.get("theme") or "brand", THEMES["brand"])
         # 全程用绝对路径：Remotion 以 remotion-composer/ 为工作目录，
         # ffmpeg 的 concat 列表按列表文件所在目录解析，相对路径两处都会失效。
@@ -418,8 +487,9 @@ class ZeroKeyVideo(BaseTool):
 
         wavs: list[Path] = []
         durations: list[float] = []
-        for i, sc in enumerate(brief.scenes, 1):
-            text = (sc.narration or sc.visual or "").strip()
+        voiced: list[dict[str, Any]] = []
+        for i, sc in enumerate(scene_dicts, 1):
+            text = (sc.get("narration") or sc.get("visual") or "").strip()
             if not text:
                 continue
             wav = work / f"scene_{i:03d}.wav"
@@ -428,6 +498,7 @@ class ZeroKeyVideo(BaseTool):
                 return ToolResult(success=False, error=f"第{i}镜配音失败：{r.error}")
             wavs.append(wav)
             durations.append(_probe_duration(wav))
+            voiced.append(sc)
 
         if not wavs:
             return ToolResult(success=False, error="没有可配音的文本")
@@ -447,7 +518,8 @@ class ZeroKeyVideo(BaseTool):
         narration_src = f"studio/{narration.name}"
 
         # ---- 3. 抓真实素材（免费源，无需密钥）----
-        scenes = [s.as_dict() for s in brief.scenes][: len(durations)]
+        # voiced 与 durations / wavs 严格一一对应（跳过了没有文本的镜）
+        scenes = voiced
         footage: list[Optional[dict[str, str]]] = []
         ai_mode = str(inputs.get("ai_fallback") or "off").lower()
         budget = inputs.get("budget_usd")
@@ -458,7 +530,8 @@ class ZeroKeyVideo(BaseTool):
         if inputs.get("use_footage", True):
             for i, sc in enumerate(scenes):
                 query = (sc.get("visual") or sc.get("narration") or "").strip()
-                shot = fetch_footage(query, public_dir, i + 1, run_id)
+                shot = fetch_footage(query, public_dir, i + 1, run_id,
+                                     variant=int(sc.get("_variant") or 0))
                 # 素材库没命中才动用 AI 生成 —— 检索免费，生成要花钱。
                 if shot is None and ai_mode in ("image", "video"):
                     shot, spent = generate_shot(query, public_dir, i + 1, ai_mode,
