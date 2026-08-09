@@ -41,6 +41,40 @@ KEY_INFO: dict[str, dict[str, str]] = {
 }
 
 
+# 重要性分级：数字越小越靠前。依据是「对成片质量的直接影响 × 获取成本」。
+PRIORITY: dict[str, int] = {
+    # 1 — 核心：直接决定成片质量，且免费或有免费额度
+    "ELEVENLABS_API_KEY": 10,   # 配音，中文自然度决定观感
+    "PEXELS_API_KEY": 11,       # 画面素材，完全免费
+    "GOOGLE_API_KEY": 12,       # 图像 + 视频 + 中文转英文检索
+    # 2 — 扩展：明显增强能力
+    "OPENAI_API_KEY": 20,
+    "FAL_KEY": 21,
+    "PIXABAY_API_KEY": 22,
+    "UNSPLASH_ACCESS_KEY": 23,
+    "GEMINI_API_KEY": 24,
+    "REPLICATE_API_TOKEN": 25,
+    # 3 — 特定场景：某类片子才用得上
+    "KLING_API_KEY": 30, "RUNWAY_API_KEY": 31, "HEYGEN_API_KEY": 32,
+    "SUNO_API_KEY": 33, "DASHSCOPE_API_KEY": 34, "XAI_API_KEY": 35,
+    "HIGGSFIELD_API_KEY": 36, "HIGGSFIELD_API_SECRET": 37,
+    "AZURE_SPEECH_KEY": 38, "DOUBAO_SPEECH_API_KEY": 39,
+    "HF_TOKEN": 40, "VOLC_ACCESSKEY": 41, "VOLC_SECRETKEY": 42,
+    "FAL_AI_API_KEY": 43,
+    "GOOGLE_APPLICATION_CREDENTIALS": 44,
+}
+
+# 这些不是密钥，是配套参数（区域、项目名、端点、本地模型开关）。
+# 和密钥混排是界面显得杂乱的主因，单独归组放到最后。
+SETTING_KEYS = {
+    "GOOGLE_CLOUD_LOCATION", "GOOGLE_CLOUD_PROJECT", "KLING_API_BASE_URL",
+    "AZURE_SPEECH_REGION", "DOUBAO_SPEECH_VOICE_TYPE", "MODAL_LTX2_ENDPOINT_URL",
+    "VIDEO_GEN_LOCAL_ENABLED", "VIDEO_GEN_LOCAL_MODEL",
+}
+
+DEFAULT_PRIORITY = 50
+
+
 def _mask(value: str) -> str:
     v = value.strip().strip('"').strip("'")
     if not v:
@@ -87,6 +121,7 @@ def status(unlock_map: dict[str, list[str]] | None = None) -> list[dict[str, Any
     for name in known_keys():
         value = current.get(name, "") or os.environ.get(name, "")
         info = KEY_INFO.get(name, {})
+        is_setting = name in SETTING_KEYS
         rows.append({
             "key": name,
             "set": bool(value),
@@ -96,8 +131,18 @@ def status(unlock_map: dict[str, list[str]] | None = None) -> list[dict[str, Any
             "tier": info.get("tier", ""),
             "unlocks": unlock_map.get(name, []),
             "unlock_count": len(unlock_map.get(name, [])),
+            "group": "setting" if is_setting else "credential",
+            "priority": PRIORITY.get(name, DEFAULT_PRIORITY),
         })
-    rows.sort(key=lambda r: (r["set"], -r["unlock_count"], r["key"]))
+
+    # 已配置的排前面（not set → False 排前），组内再按重要性，最后按名字。
+    # 配套参数整体沉底，不与密钥混排。
+    rows.sort(key=lambda r: (
+        r["group"] == "setting",
+        not r["set"],
+        r["priority"],
+        r["key"],
+    ))
     return rows
 
 

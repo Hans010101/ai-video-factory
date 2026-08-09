@@ -191,7 +191,14 @@ textarea{font-family:var(--mono);font-size:.83rem;line-height:1.65;resize:vertic
 .tcard .bf{font-size:.79rem;color:var(--ink-2);margin-top:6px}
 
 /* ---------- keys ---------- */
-.keylist{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:12px}
+.keylist{display:block}
+.kgroup{margin-bottom:30px}
+.kgh{margin-bottom:13px}
+.kgh h3{font-size:1rem;font-weight:800;display:flex;align-items:center;gap:9px}
+.kgh h3 .n{font-family:var(--mono);font-size:.75rem;font-weight:700;color:var(--ink-3);
+  background:var(--bg-3);border-radius:20px;padding:1px 10px}
+.kgh p{font-size:.8rem;color:var(--ink-3);margin-top:3px}
+.kgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:12px}
 .key{background:#fff;border:1px solid var(--line);border-radius:11px;padding:15px 17px;
   box-shadow:var(--shadow)}
 .key.set{border-color:#BFE3D1;background:linear-gradient(180deg,var(--ok-bg),#fff 40%)}

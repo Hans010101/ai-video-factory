@@ -494,7 +494,7 @@ function renderKeys() {
     + (okN ? `<span style="color:var(--ok)">已验证可用 <b>${okN}</b></span>` : '')
     + (badN ? `<span style="color:var(--err)">需处理 <b>${badN}</b></span>` : '');
 
-  $('#keyList').innerHTML = keys.map(k => {
+  const card = (k) => {
     const r = v[k.key];
     const st = k.set ? VSTATE[(r && r.state) || 'unknown'] : null;
     return `
@@ -508,7 +508,28 @@ function renderKeys() {
       ${r && r.detail && k.set ? `<div class="vdetail ${st.cls}">${esc(r.detail)}</div>` : ''}
       ${k.unlock_count ? `<div class="ku">可解锁 ${k.unlock_count} 个工具：${esc(k.unlocks.slice(0, 4).join(', '))}${k.unlocks.length > 4 ? '…' : ''}</div>` : ''}
     </div>`;
-  }).join('');
+  };
+
+  // 分三组：已配置 → 待配置 → 配套参数。三十多张卡片平铺时很难扫读，
+  // 分组后「哪些已经好了、下一个该配哪个」一眼就能看出来。
+  const groups = [
+    { key: 'done', title: '已配置',
+      hint: '状态由真实 API 探测得出，不是只看有没有填',
+      items: keys.filter(k => k.set && k.group !== 'setting') },
+    { key: 'todo', title: '待配置',
+      hint: '按重要性排序 —— 越靠前对成片质量影响越大',
+      items: keys.filter(k => !k.set && k.group !== 'setting') },
+    { key: 'setting', title: '配套参数',
+      hint: '这些不是密钥，是区域、项目名、本地模型等配置项',
+      items: keys.filter(k => k.group === 'setting') },
+  ];
+
+  $('#keyList').innerHTML = groups.filter(g => g.items.length).map(g => `
+    <div class="kgroup">
+      <div class="kgh"><h3>${g.title}<span class="n">${g.items.length}</span></h3>
+        <p>${g.hint}</p></div>
+      <div class="kgrid">${g.items.map(card).join('')}</div>
+    </div>`).join('');
 }
 
 async function verifyKeys(silent) {
