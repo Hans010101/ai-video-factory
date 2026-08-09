@@ -51,6 +51,12 @@ TITLE_SECONDS = 2.6
 TAIL_SECONDS = 1.2
 MIN_CUT_SECONDS = 1.8
 
+# 静态图片不加运镜就是一张死图撑几秒。轮换使用避免每镜都同一种推法 ——
+# 连续同向运动看久了比不动还难受。
+KEN_BURNS_CYCLE = ("ken-burns", "zoom-in", "pan-right", "zoom-out", "pan-left", "parallax")
+# 镜头间的交叉淡入淡出时长（秒）。太长会糊，太短等于硬切。
+TRANSITION_SECONDS = 0.5
+
 
 def _probe_duration(path: Path) -> float:
     out = subprocess.run(
@@ -424,10 +430,18 @@ def build_cuts(scenes: list[dict[str, Any]], durations: list[float],
         }
         shot = (footage or [None] * len(scenes))[i] if footage else None
         if shot:
-            # 有真实素材时用它当画面，旁白文字走 overlay 叠在上面。
+            # 有真实素材时用它当画面，旁白文字走字幕层。
             # 注意：组件的类型判断在 source 之前，设了文字类型就不会渲染素材。
             cut["source"] = f"studio/{shot['file']}"
             cut["source_in_seconds"] = 0
+            # 静态图片给 Ken Burns 运镜；视频本身有运动，只需要转场。
+            is_still = Path(shot["file"]).suffix.lower() in (".jpg", ".jpeg", ".png", ".webp")
+            if is_still:
+                cut["animation"] = KEN_BURNS_CYCLE[i % len(KEN_BURNS_CYCLE)]
+            else:
+                cut["transition_in"] = "fade"
+                cut["transition_out"] = "fade"
+                cut["transition_duration"] = TRANSITION_SECONDS
         else:
             # 没找到素材才退回文字画面。text_card 只渲染 text，
             # callout 能同时呈现画面提示与旁白。
