@@ -263,6 +263,72 @@ def generate_shot(query: str, out_dir: Path, index: int, kind: str,
     return None, 0.0
 
 
+# 按中文自然度排序，Piper 永远垫底兜底。
+# 「可用」只代表密钥在，不代表能调通 —— 额度耗尽会在真正请求时才报 402/429，
+# 所以必须在运行时逐个试，不能只看状态。
+NARRATOR_CHAIN = ("elevenlabs_tts", "google_tts", "openai_tts", "piper_tts")
+
+
+def narrator_candidates(preferred: str = "auto") -> list[tuple[Any, str]]:
+    """返回可尝试的配音工具链，按优先级排序。"""
+    from tools.tool_registry import registry
+    registry.ensure_discovered()
+
+    order = list(NARRATOR_CHAIN)
+    if preferred not in ("", "auto"):
+        order = [preferred] + [n for n in order if n != preferred]
+
+    out: list[tuple[Any, str]] = []
+    for name in order:
+        tool = registry.get(name)
+        if tool is not None and tool.get_status().value in ("available", "degraded"):
+            out.append((tool, name))
+    return out
+
+
+def _tts_inputs(name: str, text: str, out_path: Path, voice: str) -> dict[str, Any]:
+    job: dict[str, Any] = {"text": text, "output_path": str(out_path)}
+    if name == "piper_tts":
+        job["model"] = voice
+    elif voice:
+        job["voice_id"] = voice
+    return job
+
+
+def fetch_music(mood: str, seconds: float, out_dir: Path, prefix: str) -> Optional[dict[str, Any]]:
+    """找一段背景音乐。
+
+    没有配乐的解说片会显得很空 —— 这是「效果差」里最容易被忽略的一项。
+    优先用免费的 Pixabay 音乐库，没有再用生成。
+    """
+    from tools.tool_registry import registry
+    registry.ensure_discovered()
+
+    target = out_dir / f"{prefix}_bgm.mp3"
+
+    pix = registry.get("pixabay_music")
+    if pix is not None and pix.get_status().value in ("available", "degraded"):
+        try:
+            r = pix.execute({"query": mood, "min_duration": max(int(seconds), 10),
+                             "output_path": str(target)})
+            if r.success and target.exists() and target.stat().st_size > 20_000:
+                return {"file": target.name, "source": "Pixabay Music", "cost": 0.0}
+        except Exception:
+            pass
+
+    gen = registry.get("music_gen")
+    if gen is not None and gen.get_status().value in ("available", "degraded"):
+        try:
+            r = gen.execute({"prompt": mood, "duration_seconds": min(int(seconds) + 3, 120),
+                             "force_instrumental": True, "output_path": str(target)})
+            if r.success and target.exists() and target.stat().st_size > 20_000:
+                return {"file": target.name, "source": "AI 生成配乐",
+                        "cost": float(r.cost_usd or 0.0)}
+        except Exception:
+            pass
+    return None
+
+
 def build_credits(shots: list[Optional[dict[str, str]]]) -> str:
     """生成片尾署名文案。
 
@@ -353,27 +419,70 @@ def build_cuts(scenes: list[dict[str, Any]], durations: list[float],
     return cuts
 
 
-def build_overlays(cuts: list[dict[str, Any]], scenes: list[dict[str, Any]],
-                   theme: dict[str, str]) -> list[dict[str, Any]]:
-    """给用了真实素材的镜头叠上旁白文字 —— 素材画面本身没有文字信息。"""
-    overlays: list[dict[str, Any]] = []
-    by_id = {c["id"]: c for c in cuts}
-    for i, sc in enumerate(scenes):
-        cut = by_id.get(f"scene-{i + 1}")
-        if not cut or not cut.get("source"):
-            continue  # 文字画面本身已经带文案，不需要再叠
-        narration = (sc.get("narration") or "").strip()
-        if not narration:
+# 一条字幕的长度上限。中文一行看得舒服的极限约 14 字，超过就该断。
+_CAPTION_MAX_CHARS = 14
+_CAPTION_SPLIT = re.compile(r"(?<=[，。！？、；：,.!?;:])")
+
+
+def _caption_units(text: str) -> list[str]:
+    """把一段旁白切成适合上屏的短句。"""
+    units: list[str] = []
+    buf = ""
+    for piece in _CAPTION_SPLIT.split(text):
+        piece = piece.strip()
+        if not piece:
             continue
-        overlays.append({
-            "type": "section_title",
-            "in_seconds": cut["in_seconds"] + 0.2,
-            "out_seconds": max(cut["out_seconds"] - 0.2, cut["in_seconds"] + 0.6),
-            "text": narration,
-            "accentColor": theme["accent"],
-            "position": "bottom",
-        })
-    return overlays
+        if not buf:
+            buf = piece
+        elif len(buf) + len(piece) <= _CAPTION_MAX_CHARS:
+            buf += piece
+        else:
+            units.append(buf)
+            buf = piece
+    if buf:
+        units.append(buf)
+
+    # 没有标点的长句只能按字数硬断
+    out: list[str] = []
+    for u in units:
+        while len(u) > _CAPTION_MAX_CHARS * 2:
+            out.append(u[:_CAPTION_MAX_CHARS])
+            u = u[_CAPTION_MAX_CHARS:]
+        out.append(u)
+    return out
+
+
+def build_captions(scenes: list[dict[str, Any]], durations: list[float],
+                   offset_seconds: float) -> list[dict[str, Any]]:
+    """按每镜音频的真实时长生成同步字幕。
+
+    此前是把整段旁白当 overlay 一次性铺在画面上 —— 363 字糊满三分之一屏幕，
+    既读不了也难看。字幕应该跟着声音走，一次只出一两句。
+
+    没有逐字对齐数据，就按字数在该镜时长内等比分配。误差在半秒内，观感上
+    完全够用，而且不需要额外跑一次语音识别。
+    """
+    captions: list[dict[str, Any]] = []
+    t = offset_seconds
+
+    for sc, dur in zip(scenes, durations):
+        text = (sc.get("narration") or "").strip()
+        if not text or dur <= 0:
+            t += dur
+            continue
+        units = _caption_units(text)
+        total_chars = sum(len(u) for u in units) or 1
+        cursor = t
+        for unit in units:
+            span = dur * (len(unit) / total_chars)
+            captions.append({
+                "word": unit,
+                "startMs": int(cursor * 1000),
+                "endMs": int((cursor + span) * 1000),
+            })
+            cursor += span
+        t += dur
+    return captions
 
 
 class ZeroKeyVideo(BaseTool):
@@ -415,6 +524,14 @@ class ZeroKeyVideo(BaseTool):
             "brief": {"type": "string", "description": "脚本原文，支持「场景N」「旁白：」「画面：」标记"},
             "title": {"type": "string", "description": "片头标题，留空则自动取脚本首行"},
             "theme": {"type": "string", "enum": ["brand", "slate", "light"], "default": "brand"},
+            "voice_provider": {"type": "string", "enum": ["auto", "elevenlabs_tts", "piper_tts"],
+                               "default": "auto",
+                               "description": "auto 优先 ElevenLabs（中文自然度高），无密钥时退回本地 Piper"},
+            "captions": {"type": "boolean", "default": True,
+                         "description": "生成跟随旁白的同步字幕（而不是把整段文案铺在画面上）"},
+            "music": {"type": "boolean", "default": True, "description": "自动配背景音乐"},
+            "music_mood": {"type": "string",
+                           "description": "配乐风格描述，留空用「calm cinematic ambient emotional piano」"},
             "auto_split": {"type": "boolean", "default": True,
                            "description": "旁白过长时按句子边界自动切成多个镜头，避免几十秒不换画面"},
             "max_shot_seconds": {"type": "number", "default": 11,
@@ -472,30 +589,55 @@ class ZeroKeyVideo(BaseTool):
         # ---- 1. 逐镜配音 ----
         from tools.tool_registry import registry
         registry.ensure_discovered()
-        piper = registry.get("piper_tts")
-        if piper is None:
-            return ToolResult(success=False, error="piper_tts 不可用")
+        chain = narrator_candidates(inputs.get("voice_provider") or "auto")
+        if not chain:
+            return ToolResult(success=False, error="没有可用的配音工具")
 
-        model = (inputs.get("voice_model") or "").strip()
-        if not model:
-            has_cjk = any("一" <= ch <= "鿿" for ch in brief_text)
-            model = "zh_CN-huayan-medium" if has_cjk else "en_US-lessac-medium"
-        if "/" not in model and not model.endswith(".onnx"):
-            candidate = Path.home() / ".piper" / "models" / f"{model}.onnx"
-            if candidate.exists():
-                model = str(candidate)
+        has_cjk = any("一" <= ch <= "鿿" for ch in brief_text)
+        piper_voice = (inputs.get("voice_model") or "").strip()
+        if not piper_voice:
+            piper_voice = "zh_CN-huayan-medium" if has_cjk else "en_US-lessac-medium"
+        if "/" not in piper_voice and not piper_voice.endswith(".onnx"):
+            cand = Path.home() / ".piper" / "models" / f"{piper_voice}.onnx"
+            if cand.exists():
+                piper_voice = str(cand)
+
+        # 先用第一句探路：额度耗尽这类问题只有真正请求才会暴露（402/429），
+        # 一句话就能确定哪个提供商真的能用，避免跑到一半才失败。
+        narrator = narrator_name = None
+        probe_text = next((s.get("narration") or s.get("visual") or ""
+                           for s in scene_dicts if (s.get("narration") or s.get("visual"))), "")
+        tts_notes: list[str] = []
+        for tool, name in chain:
+            voice = piper_voice if name == "piper_tts" else (inputs.get("voice_model") or "")
+            probe_out = work / f"probe_{name}{'.wav' if name == 'piper_tts' else '.mp3'}"
+            try:
+                r = tool.execute(_tts_inputs(name, probe_text[:40], probe_out, voice))
+            except Exception as exc:
+                tts_notes.append(f"{name}: {type(exc).__name__}")
+                continue
+            if r.success and probe_out.exists():
+                narrator, narrator_name = tool, name
+                break
+            tts_notes.append(f"{name}: {str(r.error)[:70]}")
+
+        if narrator is None:
+            return ToolResult(success=False,
+                              error="所有配音工具都调用失败 —— " + "；".join(tts_notes))
 
         wavs: list[Path] = []
         durations: list[float] = []
         voiced: list[dict[str, Any]] = []
+        ext = ".wav" if narrator_name == "piper_tts" else ".mp3"
+        voice = piper_voice if narrator_name == "piper_tts" else (inputs.get("voice_model") or "")
         for i, sc in enumerate(scene_dicts, 1):
             text = (sc.get("narration") or sc.get("visual") or "").strip()
             if not text:
                 continue
-            wav = work / f"scene_{i:03d}.wav"
-            r = piper.execute({"text": text, "model": model, "output_path": str(wav)})
+            wav = work / f"scene_{i:03d}{ext}"
+            r = narrator.execute(_tts_inputs(narrator_name, text, wav, voice))
             if not r.success or not wav.exists():
-                return ToolResult(success=False, error=f"第{i}镜配音失败：{r.error}")
+                return ToolResult(success=False, error=f"第{i}镜配音失败（{narrator_name}）：{r.error}")
             wavs.append(wav)
             durations.append(_probe_duration(wav))
             voiced.append(sc)
@@ -529,7 +671,12 @@ class ZeroKeyVideo(BaseTool):
 
         if inputs.get("use_footage", True):
             for i, sc in enumerate(scenes):
-                query = (sc.get("visual") or sc.get("narration") or "").strip()
+                # 同一条画面建议切出的多镜，如果都用同一个检索词，画面只能靠
+                # variant 错开，相关性还是差。把该镜自己的旁白拼进检索词，
+                # 让每一镜的画面贴合它当下讲的内容。
+                base = (sc.get("visual") or "").strip()
+                own = (sc.get("narration") or "").strip()
+                query = f"{base} {own[:40]}".strip() if base and own else (base or own)
                 shot = fetch_footage(query, public_dir, i + 1, run_id,
                                      variant=int(sc.get("_variant") or 0))
                 # 素材库没命中才动用 AI 生成 —— 检索免费，生成要花钱。
@@ -549,19 +696,41 @@ class ZeroKeyVideo(BaseTool):
         # ---- 4. 构造 Remotion props ----
         cuts = build_cuts(scenes, durations, inputs.get("title") or brief.title,
                           theme, footage, credits)
-        overlays = build_overlays(cuts, scenes, theme)
+        title_offset = TITLE_SECONDS if (inputs.get("title") or brief.title) else 0
+        captions = (build_captions(scenes, durations, title_offset)
+                    if inputs.get("captions", True) else [])
+
+        # ---- 4.5 配乐 ----
+        total_seconds = cuts[-1]["out_seconds"] if cuts else 0
+        music = None
+        if inputs.get("music", True):
+            mood = (inputs.get("music_mood") or "").strip() or \
+                "calm cinematic ambient emotional piano"
+            music = fetch_music(mood, total_seconds, public_dir, run_id)
+            if music:
+                spent_total += float(music.get("cost") or 0.0)
         # 旁白从片头之后开始，和画面对齐
         props = {
             "theme": "flat-motion-graphics",
             "cuts": cuts,
-            "overlays": overlays,
-            "captions": [],
+            "overlays": [],
+            "captions": captions,
+            # caption 单位是短句不是单词，一次出 2 条正好一行
+            "captionsPerPage": int(inputs.get("captions_per_page") or 2),
             "audio": {
                 "narration": {
                     "src": narration_src,
                     "volume": 1.0,
-                    "offsetSeconds": TITLE_SECONDS if (inputs.get("title") or brief.title) else 0,
-                }
+                    "offsetSeconds": title_offset,
+                },
+                **({"music": {
+                    "src": f"studio/{music['file']}",
+                    # 压到旁白之下，只做垫底，不能盖住人声
+                    "volume": 0.14,
+                    "loop": True,
+                    "fadeInSeconds": 1.5,
+                    "fadeOutSeconds": 3.0,
+                }} if music else {}),
             },
         }
         props_path = work / "props.json"
@@ -596,10 +765,14 @@ class ZeroKeyVideo(BaseTool):
                 "scenes": len(scenes),
                 "narration_seconds": round(total_audio, 2),
                 "video_seconds": round(cuts[-1]["out_seconds"], 2) if cuts else 0,
-                "voice_model": Path(model).stem,
+                "voice_model": Path(voice).stem if voice else "默认音色",
                 "footage_used": sum(1 for f in footage if f),
                 "footage_sources": sorted({f["source"] for f in footage if f}),
                 "ai_generated": ai_count,
+                "narrator": narrator_name,
+                "narrator_fallbacks": tts_notes,
+                "captions": len(captions),
+                "music": (music or {}).get("source") or "无",
                 "search_queries": [f.get("query") for f in footage if f and f.get("query")],
                 "credits": credits,
             },
