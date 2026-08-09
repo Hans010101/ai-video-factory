@@ -66,3 +66,11 @@ ENV PYTHONPATH=/app \
 CMD ["/opt/venv/bin/python", "-m", "studio.agent", \
      "--url", "https://ai-video-factory.hans-pan007.workers.dev", \
      "--name", "cloudflare-container"]
+
+# 构建提醒：Cloudflare Containers 只运行 linux/amd64。
+# 在 Apple 芯片上直接 docker build 会产出 arm64 镜像，推送后无法运行，
+# 必须交叉编译：
+#   docker buildx build --platform linux/amd64 --provenance=false --load \
+#     -f cloud/Dockerfile -t ai-video-factory-renderer:amd64 .
+# 另外构建上下文必须是仓库根目录（要拷 lib/ tools/ studio/ config.yaml），
+# 不能在 cloud/ 目录下构建。
