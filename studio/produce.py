@@ -268,6 +268,35 @@ def generate_shot(query: str, out_dir: Path, index: int, kind: str,
 # 所以必须在运行时逐个试，不能只看状态。
 NARRATOR_CHAIN = ("elevenlabs_tts", "google_tts", "openai_tts", "piper_tts")
 
+# ElevenLabs 工具默认用 Rachel（21m00Tcm4TlvDq8ikWAM），那是「音色库音色」，
+# 免费账户通过 API 调用会直接 402：
+#     Free users cannot use library voices via the API.
+# 账户自有的 premade 音色则完全可用，所以这里主动选一个自有音色。
+_EL_LIBRARY_DEFAULT = "21m00Tcm4TlvDq8ikWAM"
+
+
+def elevenlabs_voice() -> str:
+    """挑一个账户自有的 ElevenLabs 音色，避开音色库音色。"""
+    import json as _json
+    import os as _os
+    import urllib.request as _rq
+
+    key = _os.environ.get("ELEVENLABS_API_KEY", "")
+    if not key:
+        return ""
+    try:
+        req = _rq.Request("https://api.elevenlabs.io/v1/voices")
+        req.add_header("xi-api-key", key)
+        req.add_header("User-Agent", "AIVideoFactory/1.0")
+        voices = _json.loads(_rq.urlopen(req, timeout=30).read()).get("voices") or []
+    except Exception:
+        return ""
+
+    owned = [v for v in voices
+             if v.get("category") in ("premade", "cloned", "generated", "professional")
+             and v.get("voice_id") != _EL_LIBRARY_DEFAULT]
+    return owned[0].get("voice_id", "") if owned else ""
+
 
 def narrator_candidates(preferred: str = "auto") -> list[tuple[Any, str]]:
     """返回可尝试的配音工具链，按优先级排序。"""
@@ -292,6 +321,9 @@ def _tts_inputs(name: str, text: str, out_path: Path, voice: str) -> dict[str, A
         job["model"] = voice
     elif voice:
         job["voice_id"] = voice
+    if name == "elevenlabs_tts":
+        # 多语种模型，中文才有可用的发音
+        job.setdefault("model_id", "eleven_multilingual_v2")
     return job
 
 
@@ -608,8 +640,15 @@ class ZeroKeyVideo(BaseTool):
         probe_text = next((s.get("narration") or s.get("visual") or ""
                            for s in scene_dicts if (s.get("narration") or s.get("visual"))), "")
         tts_notes: list[str] = []
+        el_voice = ""
         for tool, name in chain:
-            voice = piper_voice if name == "piper_tts" else (inputs.get("voice_model") or "")
+            if name == "piper_tts":
+                voice = piper_voice
+            elif name == "elevenlabs_tts":
+                el_voice = el_voice or (inputs.get("voice_model") or "") or elevenlabs_voice()
+                voice = el_voice
+            else:
+                voice = inputs.get("voice_model") or ""
             probe_out = work / f"probe_{name}{'.wav' if name == 'piper_tts' else '.mp3'}"
             try:
                 r = tool.execute(_tts_inputs(name, probe_text[:40], probe_out, voice))
@@ -629,7 +668,12 @@ class ZeroKeyVideo(BaseTool):
         durations: list[float] = []
         voiced: list[dict[str, Any]] = []
         ext = ".wav" if narrator_name == "piper_tts" else ".mp3"
-        voice = piper_voice if narrator_name == "piper_tts" else (inputs.get("voice_model") or "")
+        if narrator_name == "piper_tts":
+            voice = piper_voice
+        elif narrator_name == "elevenlabs_tts":
+            voice = el_voice
+        else:
+            voice = inputs.get("voice_model") or ""
         for i, sc in enumerate(scene_dicts, 1):
             text = (sc.get("narration") or sc.get("visual") or "").strip()
             if not text:

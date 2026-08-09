@@ -32,7 +32,8 @@ def _get(url: str, headers: dict[str, str], timeout: int = 20) -> tuple[int, str
         req.add_header(k, v)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.status, resp.read(2000).decode(errors="replace")
+            # 上限放宽到 256KB：音色列表这类响应几十 KB，截断会让 JSON 解析失败
+            return resp.status, resp.read(262144).decode(errors="replace")
     except urllib.error.HTTPError as exc:
         return exc.code, exc.read(2000).decode(errors="replace")
     except Exception as exc:
@@ -63,8 +64,12 @@ def _msg(body: str, *paths: tuple) -> str:
 def _elevenlabs(key: str) -> tuple[str, str]:
     code, body = _get("https://api.elevenlabs.io/v1/voices", {"xi-api-key": key})
     if code == 200:
-        n = len((json.loads(body).get("voices") or [])) if body.startswith("{") else 0
-        return OK, f"可用，{n} 个音色"
+        # 响应体被截断过，不能直接 json.loads —— 200 本身已说明密钥与权限没问题
+        try:
+            n = len(json.loads(body).get("voices") or [])
+            return OK, f"可用，{n} 个音色"
+        except Exception:
+            return OK, "可用"
     detail = _msg(body, ("detail", "message"), ("detail",))
     if code == 401 and "permission" in detail.lower():
         return WARN, f"密钥有效但权限不足：{detail}"
