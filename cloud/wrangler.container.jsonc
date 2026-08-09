@@ -1,0 +1,40 @@
+{
+  // AI 视频工厂 · 云端渲染容器
+  //
+  // 与 wrangler.jsonc（控制面）分开部署：控制面全在免费额度内，容器是
+  // 唯一收费的一环（Workers Paid $5/月起，按 vCPU-秒 / GiB-秒计费）。
+  // 分开的好处是控制面可以随便改随便发，不会连带触发容器重建。
+  //
+  // 计费要点：内存与磁盘按「预置量」计费而非实际用量，所以容器必须能
+  // 休眠。sleepAfter 让它在空闲后自动停机，只在真正渲染时产生费用。
+  // 常驻轮询的话 8GB 容器一个月约 $55，按需唤醒约 $5–15。
+  "name": "ai-video-factory-renderer",
+  "main": "src/container.js",
+  "compatibility_date": "2026-08-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  "containers": [
+    {
+      "class_name": "RendererContainer",
+      "image": "../cloud/Dockerfile",
+      "instance_type": {
+        "vcpu": 4,
+        "memory_mib": 8192,
+        "disk_mb": 16000
+      },
+      "max_instances": 2
+    }
+  ],
+
+  "durable_objects": {
+    "bindings": [
+      { "class_name": "RendererContainer", "name": "RENDERER" }
+    ]
+  },
+
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["RendererContainer"] }
+  ],
+
+  "observability": { "enabled": true }
+}

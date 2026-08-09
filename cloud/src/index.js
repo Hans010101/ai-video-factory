@@ -74,6 +74,18 @@ export default {
           `INSERT INTO orders (id,title,brief,status,plan_json,note,agent,created_at,updated_at)
            VALUES (?,?,?,'pending','','','',?,?)`
         ).bind(id, (body.title || '').slice(0, 200), brief, t, t).run();
+
+        // 叫醒云端渲染容器。它是按需唤醒的（常驻会一直计费），所以下单后
+        // 必须主动踢一脚，否则订单会一直挂着等本地代理。
+        // 唤醒失败不影响下单 —— 本地代理在跑的话照样能接。
+        if (env.RENDERER_WAKE_URL) {
+          try {
+            await fetch(env.RENDERER_WAKE_URL + '/wake', {
+              method: 'POST',
+              headers: { authorization: `Bearer ${env.APP_TOKEN || ''}` },
+            });
+          } catch (_) { /* 容器唤醒失败不阻塞下单 */ }
+        }
         return json({ id, status: 'pending' });
       }
 
