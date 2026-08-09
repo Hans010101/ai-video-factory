@@ -202,8 +202,9 @@ textarea{font-family:var(--mono);font-size:.83rem;line-height:1.65;resize:vertic
 .key{background:#fff;border:1px solid var(--line);border-radius:11px;padding:15px 17px;
   box-shadow:var(--shadow)}
 .key.set{border-color:#BFE3D1;background:linear-gradient(180deg,var(--ok-bg),#fff 40%)}
-.key .kh{display:flex;align-items:center;gap:8px;margin-bottom:3px}
-.key .kn{font-family:var(--mono);font-size:.82rem;font-weight:700}
+.key .kh{display:flex;align-items:center;gap:8px;margin-bottom:7px;flex-wrap:wrap}
+.key .kn{font-family:var(--mono);font-size:.82rem;font-weight:700;
+  word-break:break-all;margin-bottom:3px}
 .key .kt{font-size:.7rem;padding:1px 8px;border-radius:20px;background:var(--bg-3);
   color:var(--ink-2);margin-left:auto;white-space:nowrap}
 .key .kt.free{background:var(--ok-bg);color:var(--ok)}
@@ -211,12 +212,16 @@ textarea{font-family:var(--mono);font-size:.83rem;line-height:1.65;resize:vertic
 .key .ku{font-size:.75rem;color:var(--red-deep);margin-top:7px}
 
 /* 密钥验证状态 —— 「填了」和「能用」必须一眼分得开 */
-.vbadge{font-size:.7rem;font-weight:700;padding:2px 9px;border-radius:20px;white-space:nowrap}
-.vbadge.vok{background:var(--ok-bg);color:var(--ok)}
-.vbadge.vwarn{background:var(--warn-bg);color:var(--warn)}
-.vbadge.vbad{background:var(--err-bg);color:var(--err)}
-.vbadge.vunk{background:var(--bg-3);color:var(--ink-3)}
-.vbadge.vnone{background:var(--bg-3);color:var(--ink-3)}
+/* flex:none —— 不加会被长密钥名挤扁成一个小方块，文字全被裁掉 */
+.vbadge{display:inline-flex;align-items:center;gap:5px;flex:none;
+  font-size:.72rem;font-weight:700;padding:3px 10px;border-radius:20px;white-space:nowrap}
+.vbadge .vdot{width:6px;height:6px;border-radius:50%;flex:none;background:currentColor}
+.vbadge.vok{background:var(--ok-bg);color:var(--ok);border:1px solid #BFE3D1}
+.vbadge.vwarn{background:var(--warn-bg);color:var(--warn);border:1px solid #F0DCB0}
+.vbadge.vbad{background:var(--err-bg);color:var(--err);border:1px solid #F3C9C5}
+.vbadge.vunk{background:var(--bg-3);color:var(--ink-2);border:1px solid var(--line)}
+.vbadge.vnone{background:#fff;color:var(--ink-3);border:1px dashed var(--line)}
+.key .kt{margin-left:auto;flex:none}
 .vdetail{font-size:.76rem;margin-top:8px;padding:7px 10px;border-radius:6px;
   line-height:1.55;word-break:break-word}
 .vdetail.vok{background:var(--ok-bg);color:var(--ok)}

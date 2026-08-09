@@ -467,11 +467,13 @@ $('#allToolSearch').addEventListener('input', renderAllTools);
 $('#onlyBlocked').addEventListener('change', renderAllTools);
 
 /* ---------------- keys ---------------- */
+// 不用 emoji：部分系统字体渲染成豆腐块，反而看不出状态。用 CSS 圆点 + 纯文字。
+// 文字统一以「已配置」开头，配置与否一眼可辨，后半段才是验证结论。
 const VSTATE = {
-  ok:      { cls: 'vok',   icon: '✅', text: '已验证可用' },
-  warn:    { cls: 'vwarn', icon: '⚠️', text: '有问题' },
-  bad:     { cls: 'vbad',  icon: '❌', text: '不可用' },
-  unknown: { cls: 'vunk',  icon: '❓', text: '未验证' },
+  ok:      { cls: 'vok',   text: '已配置 · 可用' },
+  warn:    { cls: 'vwarn', text: '已配置 · 有问题' },
+  bad:     { cls: 'vbad',  text: '已配置 · 不可用' },
+  unknown: { cls: 'vunk',  text: '已配置 · 未验证' },
 };
 
 async function loadKeys() {
@@ -499,9 +501,12 @@ function renderKeys() {
     const st = k.set ? VSTATE[(r && r.state) || 'unknown'] : null;
     return `
     <div class="key ${k.set ? 'set' : ''} ${st ? st.cls : ''}">
-      <div class="kh"><span class="kn">${esc(k.key)}</span>
-        ${st ? `<span class="vbadge ${st.cls}">${st.icon} ${st.text}</span>` : '<span class="vbadge vnone">未配置</span>'}
-        ${k.tier ? `<span class="kt ${/免费|完全免费/.test(k.tier) ? 'free' : ''}">${esc(k.tier)}</span>` : ''}</div>
+      <div class="kh">
+        ${st ? `<span class="vbadge ${st.cls}"><i class="vdot"></i>${st.text}</span>`
+             : '<span class="vbadge vnone"><i class="vdot"></i>未配置</span>'}
+        ${k.tier ? `<span class="kt ${/免费|完全免费/.test(k.tier) ? 'free' : ''}">${esc(k.tier)}</span>` : ''}
+      </div>
+      <div class="kn">${esc(k.key)}</div>
       ${k.label ? `<div class="kl">${esc(k.label)}${k.url ? ` · <a href="${esc(k.url)}" target="_blank" rel="noopener">申请</a>` : ''}</div>` : ''}
       <input class="inp" data-key="${esc(k.key)}" type="password" autocomplete="off"
         placeholder="${k.set ? k.masked + '（留空保持不变）' : '粘贴密钥…'}">
