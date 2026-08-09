@@ -438,6 +438,27 @@ def _footage_provider() -> tuple[str, str]:
     return "无可用素材源", "将退回纯文字动画画面"
 
 
+def _narrator_preview() -> tuple[str, str, str]:
+    """预览会用哪个配音提供商，与实际执行的降级链保持一致。"""
+    try:
+        from studio.produce import narrator_candidates
+        chain = narrator_candidates("auto")
+    except Exception:
+        chain = []
+    if not chain:
+        return "piper_tts", i18n.tool_name("piper_tts"), "本地离线兜底"
+    name = chain[0][1]
+    tail = "，失败时自动降级到 " + "、".join(i18n.tool_name(n) for _, n in chain[1:3]) \
+        if len(chain) > 1 else ""
+    notes = {
+        "elevenlabs_tts": "中文自然度最好",
+        "google_tts": "云端合成",
+        "openai_tts": "云端合成",
+        "piper_tts": "本地离线，按脚本语言自动选中英文音色",
+    }
+    return name, i18n.tool_name(name), notes.get(name, "") + tail
+
+
 def _build_oneshot_plan(brief: Brief, has_narration: bool, has_visual: bool,
                         ai_fallback: str = "off",
                         budget: Optional[float] = None) -> dict[str, Any]:
@@ -458,8 +479,11 @@ def _build_oneshot_plan(brief: Brief, has_narration: bool, has_visual: bool,
     # 这些是 zero_key_video 内部会依次做的事，列出来是为了让你看清链路，
     # 它们不会各自入队 —— 全部在同一个任务里完成。
     inner = [
-        {"stage": "配音", "tool": "piper_tts", "tool_label": i18n.tool_name("piper_tts"),
-         "available": True, "reason": "本地离线，按脚本语言自动选中英文音色",
+        # 工序链要显示真正会用的配音提供商 —— 写死 piper_tts 会误导：
+        # 实际执行走的是 ElevenLabs → Google → OpenAI → Piper 的降级链。
+        {"stage": "配音", "tool": _narrator_preview()[0],
+         "tool_label": _narrator_preview()[1],
+         "available": True, "reason": _narrator_preview()[2],
          "detail": f"{narr_n} 条旁白逐镜生成", "job_count": 0, "dispatchable": False,
          "candidates": []},
         # 「有没有可用工具」和「脚本里有没有画面建议」是两回事。素材源就绪

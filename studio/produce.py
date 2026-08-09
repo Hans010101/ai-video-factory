@@ -175,7 +175,11 @@ def fetch_footage(query: str, out_dir: Path, index: int,
     from studio.translate import to_english
     search_query = to_english(query)
 
-    filters = SearchFilters(per_page=6)
+    # 必须限定横构图与最小宽度：成片是 1920x1080，竖屏素材按 cover 裁剪后
+    # 主体会被切掉 —— 人物只剩脖子和衣领，这正是「画面不全」的来源。
+    # 时长下限过滤掉一两秒的碎片，那种素材撑不满一个镜头。
+    filters = SearchFilters(per_page=12, orientation="landscape",
+                            min_width=1280, min_duration=4)
     for source in available_sources():
         try:
             hits = source.search(search_query, filters)
@@ -184,6 +188,12 @@ def fetch_footage(query: str, out_dir: Path, index: int,
         # 同一条画面建议切出的多个镜头共享检索结果，按 variant 错开取用，
         # 否则整段都是同一个画面，等于没切。
         pool = list(hits or [])
+        # 二道兜底：部分源站不认 orientation 过滤，这里按实际宽高再筛一次。
+        # 宽高比低于 1.2 的（竖屏、方形）裁到 16:9 一定会切掉主体。
+        wide = [c for c in pool
+                if (getattr(c, "width", 0) or 0) >= (getattr(c, "height", 1) or 1) * 1.2]
+        pool = wide or pool  # 全被筛掉时退回原结果，总比没画面强
+
         if variant and pool:
             pool = pool[variant % len(pool):] + pool[:variant % len(pool)]
         for cand in pool[:3]:
@@ -219,6 +229,10 @@ AI_FALLBACK_TOOLS = {
     "video": ("gemini_omni_video", "sora_video", "veo_video"),
 }
 
+# 生成失败的原因收集器。配额用尽、密钥失效这类问题必须让人看见，
+# 静默退回文字画面会让人以为「功能没做」。
+_GEN_ERRORS: list[str] = []
+
 
 def generate_shot(query: str, out_dir: Path, index: int, kind: str,
                   budget_left: Optional[float],
@@ -250,12 +264,17 @@ def generate_shot(query: str, out_dir: Path, index: int, kind: str,
 
         try:
             result = tool.execute(inputs)
-        except Exception:
+        except Exception as exc:
+            _GEN_ERRORS.append(f"{name}: {type(exc).__name__}: {exc}"[:160])
             continue
         if not result.success:
+            # 静默跳过会让人以为「没生成」，实际是配额用尽/密钥失效这类
+            # 需要处理的问题。记下来在结果里回报。
+            _GEN_ERRORS.append(f"{name}: {str(result.error)[:140]}")
             continue
         path = Path((result.artifacts or [inputs["output_path"]])[0])
         if not path.exists() or path.stat().st_size < 10_000:
+            _GEN_ERRORS.append(f"{name}: 产出文件缺失或过小")
             continue
 
         spent = float(result.cost_usd or estimate)
@@ -365,6 +384,60 @@ def fetch_music(mood: str, seconds: float, out_dir: Path, prefix: str) -> Option
         except Exception:
             pass
     return None
+
+
+# 画面风格预设。实拍素材的问题是构图不可控 —— 检索到什么就是什么，
+# 人物可能只拍到半张脸。生成式风格能保证每镜构图完整、风格统一。
+VISUAL_STYLES: dict[str, dict[str, str]] = {
+    "footage": {
+        "label": "实拍素材",
+        "prompt": "",
+        "note": "从 Pexels 等素材库检索真实影像，免费但构图不可控",
+    },
+    "comic": {
+        "label": "漫画插画",
+        "prompt": ("Modern Chinese editorial comic illustration, clean bold linework, "
+                   "flat muted color palette, warm neutral tones with one accent color, "
+                   "expressive but restrained character faces, full figures well composed "
+                   "within a 16:9 frame, generous negative space, no text, no watermark, "
+                   "cinematic staging. Scene: "),
+        "note": "AI 生成统一风格插画，构图完整可控，约 $0.04/张",
+    },
+    "cinematic": {
+        "label": "电影质感",
+        "prompt": ("Cinematic photographic still, 16:9 widescreen composition, shallow depth "
+                   "of field, natural window light, muted film color grade, subject fully "
+                   "framed with headroom, no text, no watermark. Scene: "),
+        "note": "AI 生成写实画面，构图完整，约 $0.04/张",
+    },
+    "ink": {
+        "label": "水墨留白",
+        "prompt": ("Minimal Chinese ink-wash illustration, generous negative space, "
+                   "restrained brushwork, muted ink tones with a single warm accent, "
+                   "16:9 composition, contemplative mood, no text, no watermark. Scene: "),
+        "note": "AI 生成水墨风，适合情感与哲思类内容，约 $0.04/张",
+    },
+}
+
+
+def generate_styled_shot(scene_text: str, style: str, out_dir: Path, index: int,
+                         prefix: str, budget_left: Optional[float]
+                         ) -> tuple[Optional[dict[str, str]], float]:
+    """按选定风格生成整片统一的画面。
+
+    与 generate_shot 的区别：那个是「检索没命中时的兜底」，这个是「主动
+    选择生成式风格」—— 整片每一镜都走同一套风格提示词，画面语言统一，
+    且构图由提示词约束（16:9、主体完整、留白），不会出现实拍素材那种
+    人物被裁掉的情况。
+    """
+    preset = VISUAL_STYLES.get(style)
+    if not preset or not preset["prompt"]:
+        return None, 0.0
+
+    from studio.translate import to_english
+    subject = to_english(scene_text)[:220]
+    return generate_shot(preset["prompt"] + subject, out_dir, index,
+                         "image", budget_left, prefix)
 
 
 def build_credits(shots: list[Optional[dict[str, str]]]) -> str:
@@ -582,6 +655,9 @@ class ZeroKeyVideo(BaseTool):
                            "description": "旁白过长时按句子边界自动切成多个镜头，避免几十秒不换画面"},
             "max_shot_seconds": {"type": "number", "default": 11,
                                  "description": "单镜最长秒数，超过就切分"},
+            "visual_style": {"type": "string", "enum": ["footage", "comic", "cinematic", "ink"],
+                             "default": "footage",
+                             "description": "footage=检索实拍（免费但构图不可控）；comic/cinematic/ink=AI 生成统一风格，构图完整，约 $0.04/镜"},
             "use_footage": {"type": "boolean", "default": True,
                             "description": "按画面建议检索实拍素材（配了 PEXELS_API_KEY 走策展库，否则走公共档案馆）；关闭则纯文字画面"},
             "ai_fallback": {"type": "string", "enum": ["off", "image", "video"], "default": "off",
@@ -720,12 +796,15 @@ class ZeroKeyVideo(BaseTool):
         # ---- 3. 抓真实素材（免费源，无需密钥）----
         # voiced 与 durations / wavs 严格一一对应（跳过了没有文本的镜）
         scenes = voiced
+        _GEN_ERRORS.clear()
         footage: list[Optional[dict[str, str]]] = []
         ai_mode = str(inputs.get("ai_fallback") or "off").lower()
         budget = inputs.get("budget_usd")
         budget_left = float(budget) if budget not in (None, "") else None
         spent_total = 0.0
         ai_count = 0
+
+        style = str(inputs.get("visual_style") or "footage").lower()
 
         if inputs.get("use_footage", True):
             for i, sc in enumerate(scenes):
@@ -735,6 +814,19 @@ class ZeroKeyVideo(BaseTool):
                 base = (sc.get("visual") or "").strip()
                 own = (sc.get("narration") or "").strip()
                 query = f"{base} {own[:40]}".strip() if base and own else (base or own)
+
+                if style != "footage":
+                    # 生成式风格：整片统一，构图由提示词约束，不检索素材库
+                    shot, spent = generate_styled_shot(
+                        query, style, public_dir, i + 1, run_id, budget_left)
+                    if shot:
+                        ai_count += 1
+                        spent_total += spent
+                        if budget_left is not None:
+                            budget_left = max(budget_left - spent, 0.0)
+                    footage.append(shot)
+                    continue
+
                 shot = fetch_footage(query, public_dir, i + 1, run_id,
                                      variant=int(sc.get("_variant") or 0))
                 # 素材库没命中才动用 AI 生成 —— 检索免费，生成要花钱。
@@ -829,6 +921,8 @@ class ZeroKeyVideo(BaseTool):
                 "ai_generated": ai_count,
                 "narrator": narrator_name,
                 "narrator_fallbacks": tts_notes,
+                "visual_style": style,
+                "generation_errors": list(dict.fromkeys(_GEN_ERRORS))[:4],
                 "captions": len(captions),
                 "music": (music or {}).get("source") or "无",
                 "search_queries": [f.get("query") for f in footage if f and f.get("query")],
