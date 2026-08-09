@@ -24,8 +24,30 @@ from studio import i18n
 # ---- 分镜识别标记 ----
 _NARRATION_TAGS = ("旁白", "配音", "解说", "口播", "台词", "narration", "voiceover", "vo")
 _VISUAL_TAGS = ("画面", "视觉", "镜头", "视频", "素材", "visual", "shot", "b-roll", "broll")
+
+# 实际写脚本时未必带冒号，常见写法是「画面提示词 现代都市插画…」这样用空格
+# 分隔。这些标记只在行首整词匹配，所以不会误伤正文里出现的同名词。
+_BARE_MARKERS = (
+    "画面提示词", "视觉提示词", "画面描述", "画面内容", "画面提示", "视觉提示",
+    "提示词", "分镜画面", "image prompt", "visual prompt", "prompt",
+    "旁白文案", "配音文案", "解说词",
+)
+_BARE_TAG = re.compile(
+    r"^\s*[\[【(]?\s*(" + "|".join(re.escape(m) for m in
+                                  sorted(_BARE_MARKERS, key=len, reverse=True))
+    + r")\s*[\]】)]?[\s　]+(.+)$",
+    re.IGNORECASE,
+)
+# 两种常见的分镜标题写法都要认：
+#   「场景1」「镜头 2」「scene 3」   —— 关键词在前
+#   「第1镜」「第2幕」「第三段」      —— 序号在中间
 _SCENE_HEAD = re.compile(
-    r"^(?:#{1,6}\s*)?(?:场景|镜头|片段|段落|scene|shot|part)\s*[:：#]?\s*(\d+)?[.、:：]?\s*(.*)$",
+    r"^(?:#{1,6}\s*)?(?:"
+    r"(?:场景|镜头|片段|段落|scene|shot|part)\s*[:：#]?\s*(\d+)?"
+    # 后面必须是行尾或分隔符 —— 否则「第一段话。」这种正常行文会被
+    # 误判成分镜标题，把整段吞掉。
+    r"|第\s*(\d+|[一二三四五六七八九十百]+)\s*(?:镜|幕|段|场|节|部分)(?=$|[\s　:：.、·\-—|])"
+    r")[.、:：]?\s*(.*)$",
     re.IGNORECASE,
 )
 _LIST_HEAD = re.compile(r"^\s*(?:\d+[.、)]|[-*+])\s+(.*)$")
@@ -95,11 +117,18 @@ def extract_text(filename: str, data: bytes) -> str:
 
 
 def _strip_tag(line: str) -> tuple[str, str]:
-    """把「旁白：xxx」拆成 (tag, content)；没有标记时 tag 为空。"""
+    """把「旁白：xxx」或「画面提示词 xxx」拆成 (tag, content)。
+
+    带冒号的写法用通用规则；不带冒号的只认白名单里的标记，避免把正文
+    第一个词误判成角色标记。
+    """
     m = _TAG_LINE.match(line)
-    if not m:
-        return "", line.strip()
-    return m.group(1).strip().lower(), m.group(2).strip()
+    if m:
+        return m.group(1).strip().lower(), m.group(2).strip()
+    m = _BARE_TAG.match(line)
+    if m:
+        return m.group(1).strip().lower(), m.group(2).strip()
+    return "", line.strip()
 
 
 def parse_brief(text: str) -> Brief:
@@ -113,12 +142,17 @@ def parse_brief(text: str) -> Brief:
     lines = [ln.rstrip() for ln in (text or "").replace("\r\n", "\n").split("\n")]
     brief = Brief(raw_chars=len(text or ""), raw_text=text or "")
 
-    # 标题：第一条非空行，若像 markdown 标题或很短则采用
-    for ln in lines:
+    # 标题：第一条非空行，若像 markdown 标题或很短则采用。
+    # 以句末标点结尾的不算 —— 那是正文第一句，当成标题会把它整句吞掉。
+    title_line = -1
+    for idx, ln in enumerate(lines):
         if ln.strip():
             candidate = re.sub(r"^#+\s*", "", ln).strip()
-            if len(candidate) <= 60 and not _SCENE_HEAD.match(ln):
+            looks_like_sentence = candidate.endswith(("。", "！", "？", ".", "!", "?", "；", ";"))
+            if (len(candidate) <= 60 and not looks_like_sentence
+                    and not _SCENE_HEAD.match(ln) and not _strip_tag(ln)[0]):
                 brief.title = candidate
+                title_line = idx
             break
 
     scenes: list[Scene] = []
@@ -132,15 +166,19 @@ def parse_brief(text: str) -> Brief:
             scenes.append(current)
         return current
 
-    for ln in lines:
+    for idx, ln in enumerate(lines):
+        # 已经取作标题的那一行不再当正文，否则标题会重复出现在第一镜旁白里
+        if idx == title_line:
+            continue
         stripped = ln.strip()
         if not stripped:
             pending_blank = True
             continue
 
         head = _SCENE_HEAD.match(stripped)
-        if head and (head.group(1) or head.group(2)):
-            current = Scene(index=len(scenes) + 1, title=(head.group(2) or "").strip())
+        # group(1)=「场景1」的序号，group(2)=「第1镜」的序号，group(3)=标题余文
+        if head and (head.group(1) or head.group(2) or head.group(3)):
+            current = Scene(index=len(scenes) + 1, title=(head.group(3) or "").strip())
             scenes.append(current)
             pending_blank = False
             continue
@@ -376,10 +414,15 @@ def _build_oneshot_plan(brief: Brief, has_narration: bool, has_visual: bool,
          "available": True, "reason": "本地离线，按脚本语言自动选中英文音色",
          "detail": f"{narr_n} 条旁白逐镜生成", "job_count": 0, "dispatchable": False,
          "candidates": []},
-        {"stage": "画面素材", "tool": "", "tool_label": src_name,
-         "available": bool(has_visual), "reason": src_note,
+        # 「有没有可用工具」和「脚本里有没有画面建议」是两回事。素材源就绪
+        # 但脚本没写画面建议时，标成「受阻」会让人以为要去配密钥 —— 实际
+        # 只要在脚本里加一行「画面：」就行，提示必须说清这一点。
+        {"stage": "画面素材", "tool": "",
+         "tool_label": src_name if has_visual else "文字动画画面",
+         "available": True,
+         "reason": src_note if has_visual else "脚本未提供画面建议，本次用文字动画呈现",
          "detail": f"按 {vis_n} 条画面建议检索并下载实拍素材" if has_visual
-                   else "脚本没有画面建议，将使用文字动画画面",
+                   else "想要实拍画面，在每镜下加一行「画面：想要的镜头」即可",
          "job_count": 0, "dispatchable": False, "candidates": []},
         {"stage": "排布与拼接", "tool": "ffmpeg", "tool_label": "FFmpeg",
          "available": True, "reason": "按每镜旁白的真实时长排布，声画自动对齐",
