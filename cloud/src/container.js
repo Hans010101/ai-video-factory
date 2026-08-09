@@ -16,14 +16,20 @@ export class RendererContainer extends Container {
   // （冷启动要拉起 Python + Node + Chromium，代价不小）。
   sleepAfter = '10m';
 
-  // 密钥不写进镜像，运行时从 Worker Secrets 注入
-  envVars = {
-    AVF_TOKEN: this.env.APP_TOKEN ?? '',
-    ELEVENLABS_API_KEY: this.env.ELEVENLABS_API_KEY ?? '',
-    GOOGLE_API_KEY: this.env.GOOGLE_API_KEY ?? '',
-    OPENAI_API_KEY: this.env.OPENAI_API_KEY ?? '',
-    PEXELS_API_KEY: this.env.PEXELS_API_KEY ?? '',
-  };
+  // 密钥不写进镜像，运行时从 Worker Secrets 注入。
+  // 必须在构造函数里赋值：类字段初始化器执行时 this.env 尚未被基类设置，
+  // 写成类字段会全部取到 undefined —— 容器会因为拿不到 AVF_TOKEN 而以
+  // 退出码 2 结束（studio.agent 缺令牌时的返回值）。
+  constructor(ctx, env) {
+    super(ctx, env);
+    this.envVars = {
+      AVF_TOKEN: env.APP_TOKEN ?? '',
+      ELEVENLABS_API_KEY: env.ELEVENLABS_API_KEY ?? '',
+      GOOGLE_API_KEY: env.GOOGLE_API_KEY ?? '',
+      OPENAI_API_KEY: env.OPENAI_API_KEY ?? '',
+      PEXELS_API_KEY: env.PEXELS_API_KEY ?? '',
+    };
+  }
 
   onStart() {
     console.log('渲染容器已启动，开始轮询订单');
@@ -60,8 +66,17 @@ export default {
     // 唤醒：控制面收到订单后调这里，容器起来后自己去认领
     if (url.pathname === '/wake') {
       const c = getContainer(env.RENDERER);
+      // 显式带上密钥。此前传了 startOptions:{envVars:{}}，那个空对象会覆盖
+      // 类里配置的 envVars，容器因此拿不到 AVF_TOKEN，以退出码 2 结束。
+      const envVars = {
+        AVF_TOKEN: env.APP_TOKEN ?? '',
+        ELEVENLABS_API_KEY: env.ELEVENLABS_API_KEY ?? '',
+        GOOGLE_API_KEY: env.GOOGLE_API_KEY ?? '',
+        OPENAI_API_KEY: env.OPENAI_API_KEY ?? '',
+        PEXELS_API_KEY: env.PEXELS_API_KEY ?? '',
+      };
       try {
-        await c.startAndWaitForPorts({ startOptions: { envVars: {} } });
+        await c.startAndWaitForPorts({ startOptions: { envVars } });
         return json({ ok: true, state: 'running' });
       } catch (err) {
         // 容器没有对外端口（它只发出站请求），startAndWaitForPorts 会超时，

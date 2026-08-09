@@ -142,6 +142,18 @@ export default {
       if (path === '/api/agent/claim' && method === 'POST') {
         const body = await readJson(request);
         const agent = (body.agent || 'local').slice(0, 60);
+
+        // 认领前先回收僵死订单：渲染节点中途挂掉（容器被回收、进程崩溃、
+        // 网络断开）时订单会永远停在 claimed/running，没人再碰它。
+        // 超过 20 分钟没有任何更新就退回 pending 让别人重新接。
+        // 单条片子正常 1–5 分钟，20 分钟足够容错而不会误伤。
+        const STALE_MS = 20 * 60 * 1000;
+        await env.DB.prepare(
+          `UPDATE orders SET status='pending', note='上一个渲染节点超时未响应，已重新排队',
+                             agent='', updated_at=?
+           WHERE status IN ('claimed','running','planned') AND updated_at < ?`
+        ).bind(now(), now() - STALE_MS).run();
+
         const o = await env.DB.prepare(
           `SELECT id,title,brief FROM orders WHERE status='pending'
            ORDER BY created_at ASC LIMIT 1`

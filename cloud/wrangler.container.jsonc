@@ -16,11 +16,20 @@
   "containers": [
     {
       "class_name": "RendererContainer",
-      "image": "../cloud/Dockerfile",
+      // 直接引用已推送并验证过的镜像：wrangler 本地重建会用 cloud/ 作构建
+      // 上下文（拷不到仓库根的 lib/ tools/ config.yaml），且以 301KB/s 的
+      // 上行重传 786MB 代价过高。
+      "image": "registry.cloudflare.com/bc38e5e2276c7d1f104801bd888a138c/ai-video-factory-renderer:amd64",
+      // Cloudflare 规定前 4 个 vCPU 每个至少配 3GiB 内存 —— 4 vCPU 就必须
+      // 12GiB，配 8GiB 会被 VALIDATE_INPUT 拒绝。
+      // 这里选 2 vCPU / 6GiB：渲染够用，且内存按预置量计费，12GiB 常驻的
+      // 账单是 6GiB 的两倍。
+      // 磁盘另有约束：不得超过内存的 2 倍，6GiB 内存对应上限 12GB。
+      // 镜像 786MB + 素材缓存，12GB 绰绰有余。
       "instance_type": {
-        "vcpu": 4,
-        "memory_mib": 8192,
-        "disk_mb": 16000
+        "vcpu": 2,
+        "memory_mib": 6144,
+        "disk_mb": 12000
       },
       "max_instances": 2
     }
