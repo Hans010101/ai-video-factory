@@ -502,8 +502,10 @@ function renderKeys() {
     return `
     <div class="key ${k.set ? 'set' : ''} ${st ? st.cls : ''}">
       <div class="kh">
-        ${st ? `<span class="vbadge ${st.cls}"><i class="vdot"></i>${st.text}</span>`
-             : '<span class="vbadge vnone"><i class="vdot"></i>未配置</span>'}
+        ${k.set
+          ? `<span class="setflag">已配置</span>
+             <span class="vbadge ${st.cls}"><i class="vdot"></i>${st.text.replace('已配置 · ', '')}</span>`
+          : '<span class="vbadge vnone"><i class="vdot"></i>未配置</span>'}
         ${k.tier ? `<span class="kt ${/免费|完全免费/.test(k.tier) ? 'free' : ''}">${esc(k.tier)}</span>` : ''}
       </div>
       <div class="kn">${esc(k.key)}</div>

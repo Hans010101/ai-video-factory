@@ -212,6 +212,12 @@ textarea{font-family:var(--mono);font-size:.83rem;line-height:1.65;resize:vertic
 .key .ku{font-size:.75rem;color:var(--red-deep);margin-top:7px}
 
 /* 密钥验证状态 —— 「填了」和「能用」必须一眼分得开 */
+/* 「已配置」独立成签：配没配是第一眼要看的，验证结论是第二眼 */
+.setflag{display:inline-flex;align-items:center;flex:none;
+  font-size:.72rem;font-weight:800;letter-spacing:.02em;
+  padding:3px 11px;border-radius:20px;white-space:nowrap;
+  background:var(--red);color:#fff}
+
 /* flex:none —— 不加会被长密钥名挤扁成一个小方块，文字全被裁掉 */
 .vbadge{display:inline-flex;align-items:center;gap:5px;flex:none;
   font-size:.72rem;font-weight:700;padding:3px 10px;border-radius:20px;white-space:nowrap}

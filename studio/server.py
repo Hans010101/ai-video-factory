@@ -309,7 +309,8 @@ def create_app() -> FastAPI:
         f = UI_DIR / "index.html"
         if not f.exists():
             return HTMLResponse("<h1>UI 未安装</h1>", status_code=500)
-        return HTMLResponse(f.read_text(encoding="utf-8"))
+        return HTMLResponse(f.read_text(encoding="utf-8"),
+                            headers={"Cache-Control": "no-cache, must-revalidate"})
 
     @app.get("/ui/{name}")
     def ui_asset(name: str):
@@ -317,7 +318,11 @@ def create_app() -> FastAPI:
         if not str(p).startswith(str(UI_DIR)) or not p.exists():
             raise HTTPException(status_code=404, detail="not found")
         mime, _ = mimetypes.guess_type(str(p))
-        return FileResponse(p, media_type=mime or "text/plain")
+        # 不加 Cache-Control 时浏览器会按启发式规则长期缓存 JS/CSS，
+        # 界面改了却送不到用户眼前（本地工具改动频繁，这个坑很致命）。
+        # no-cache 是「每次都回源校验」，配合 etag 命中时仍是 304，开销很小。
+        return FileResponse(p, media_type=mime or "text/plain",
+                            headers={"Cache-Control": "no-cache, must-revalidate"})
 
     return app
 
