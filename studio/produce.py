@@ -315,6 +315,10 @@ NARRATOR_CHAIN = ("elevenlabs_tts", "google_tts", "openai_tts", "piper_tts")
 # 账户自有的 premade 音色则完全可用，所以这里主动选一个自有音色。
 _EL_LIBRARY_DEFAULT = "21m00Tcm4TlvDq8ikWAM"
 
+# 默认男声：Daniel，播音腔、正式、中文咬字清晰，适合观点与解说类内容。
+# 账户自有音色，免费额度可用。改音色只需传 voice_model。
+_EL_PREFERRED_VOICE = "onwK4e9ZLuTAKqWW03F9"
+
 
 def elevenlabs_voice() -> str:
     """挑一个账户自有的 ElevenLabs 音色，避开音色库音色。"""
@@ -325,6 +329,8 @@ def elevenlabs_voice() -> str:
     key = _os.environ.get("ELEVENLABS_API_KEY", "")
     if not key:
         return ""
+    if _EL_PREFERRED_VOICE:
+        return _EL_PREFERRED_VOICE
     try:
         req = _rq.Request("https://api.elevenlabs.io/v1/voices")
         req.add_header("xi-api-key", key)
@@ -674,8 +680,8 @@ class ZeroKeyVideo(BaseTool):
                            "description": "旁白过长时按句子边界自动切成多个镜头，避免几十秒不换画面"},
             "max_shot_seconds": {"type": "number", "default": 11,
                                  "description": "单镜最长秒数，超过就切分"},
-            "visual_style": {"type": "string", "enum": ["footage", "comic", "cinematic", "ink"],
-                             "default": "footage",
+            "visual_style": {"type": "string", "enum": ["comic", "cinematic", "ink", "footage"],
+                             "default": "comic",
                              "description": "footage=检索实拍（免费但构图不可控）；comic/cinematic/ink=AI 生成统一风格，构图完整，约 $0.04/镜"},
             "use_footage": {"type": "boolean", "default": True,
                             "description": "按画面建议检索实拍素材（配了 PEXELS_API_KEY 走策展库，否则走公共档案馆）；关闭则纯文字画面"},
@@ -823,7 +829,9 @@ class ZeroKeyVideo(BaseTool):
         spent_total = 0.0
         ai_count = 0
 
-        style = str(inputs.get("visual_style") or "footage").lower()
+        # 默认走漫画插画：实拍素材库对情感/观点类内容匹配不上，检索到的
+        # 多是通用城市空镜；生成式插画能精确表达「客厅里沉默的两个人」。
+        style = str(inputs.get("visual_style") or "comic").lower()
 
         if inputs.get("use_footage", True):
             for i, sc in enumerate(scenes):
