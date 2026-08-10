@@ -475,6 +475,26 @@ def narrator_candidates(preferred: str = "auto") -> list[tuple[Any, str]]:
     return out
 
 
+def _tts_with_retry(tool: Any, job: dict[str, Any], attempts: int = 3) -> Any:
+    """带退避的 TTS 调用。
+
+    短句分合成会把请求数放大三四倍（8 镜的片子要发近 30 次），很容易撞上
+    供应商的速率限制。瞬时限流应该等一下重试，而不是直接判定这家不可用
+    ——那会让整片回落到音质更差的备选，得不偿失。
+    """
+    last = None
+    for i in range(attempts):
+        last = tool.execute(job)
+        if last.success:
+            return last
+        msg = str(last.error or "")
+        transient = any(k in msg for k in ("429", "Too Many", "rate", "timeout", "503", "502"))
+        if not transient or i == attempts - 1:
+            return last
+        time.sleep(1.5 * (i + 1))
+    return last
+
+
 def _tts_inputs(name: str, text: str, out_path: Path, voice: str) -> dict[str, Any]:
     job: dict[str, Any] = {"text": text, "output_path": str(out_path)}
 
@@ -510,12 +530,16 @@ def fetch_music(mood: str, seconds: float, out_dir: Path, prefix: str) -> Option
     pix = registry.get("pixabay_music")
     if pix is not None and pix.get_status().value in ("available", "degraded"):
         try:
-            r = pix.execute({"query": mood, "min_duration": max(int(seconds), 10),
+            # min_duration 卡太死会搜不到：曲库里超过一分钟的免费曲目本就少，
+            # 上限压到 45 秒，短了循环播放即可（props 里已开 loop）。
+            r = pix.execute({"query": mood,
+                             "min_duration": min(max(int(seconds * 0.6), 10), 45),
                              "output_path": str(target)})
             if r.success and target.exists() and target.stat().st_size > 20_000:
                 return {"file": target.name, "source": "Pixabay Music", "cost": 0.0}
-        except Exception:
-            pass
+            _GEN_ERRORS.append(f"pixabay_music: {str(r.error)[:120]}")
+        except Exception as exc:
+            _GEN_ERRORS.append(f"pixabay_music: {type(exc).__name__}: {exc}"[:140])
 
     gen = registry.get("music_gen")
     if gen is not None and gen.get_status().value in ("available", "degraded"):
@@ -525,8 +549,9 @@ def fetch_music(mood: str, seconds: float, out_dir: Path, prefix: str) -> Option
             if r.success and target.exists() and target.stat().st_size > 20_000:
                 return {"file": target.name, "source": "AI 生成配乐",
                         "cost": float(r.cost_usd or 0.0)}
-        except Exception:
-            pass
+            _GEN_ERRORS.append(f"music_gen: {str(r.error)[:120]}")
+        except Exception as exc:
+            _GEN_ERRORS.append(f"music_gen: {type(exc).__name__}: {exc}"[:140])
     return None
 
 
@@ -718,6 +743,22 @@ def _caption_units(text: str) -> list[str]:
     return out
 
 
+def captions_from_bursts(burst_timeline: list[tuple[str, float, float]],
+                         offset_seconds: float) -> list[dict[str, Any]]:
+    """用每个短句的真实时长生成字幕。
+
+    短句分合成之后，每一块的实际时长是量出来的而不是估的 —— 字幕直接
+    按这个时间轴走，和声音严丝合缝，不会像按字数等比分配那样越到后面
+    偏得越多。短句本身也正好是一条字幕的长度。
+    """
+    return [
+        {"word": text, "startMs": int((offset_seconds + start) * 1000),
+         "endMs": int((offset_seconds + end) * 1000)}
+        for text, start, end in burst_timeline
+        if text.strip()
+    ]
+
+
 def build_captions(scenes: list[dict[str, Any]], durations: list[float],
                    offset_seconds: float) -> list[dict[str, Any]]:
     """按每镜音频的真实时长生成同步字幕。
@@ -894,7 +935,7 @@ class ZeroKeyVideo(BaseTool):
                 voice = inputs.get("voice_model") or ""
             probe_out = work / f"probe_{name}{'.wav' if name == 'piper_tts' else '.mp3'}"
             try:
-                r = tool.execute(_tts_inputs(name, probe_text[:40], probe_out, voice))
+                r = _tts_with_retry(tool, _tts_inputs(name, probe_text[:40], probe_out, voice))
             except Exception as exc:
                 tts_notes.append(f"{name}: {type(exc).__name__}")
                 continue
@@ -910,6 +951,9 @@ class ZeroKeyVideo(BaseTool):
         wavs: list[Path] = []
         durations: list[float] = []
         voiced: list[dict[str, Any]] = []
+        # (短句文本, 相对音轨起点的开始秒, 结束秒) —— 字幕据此精确对齐
+        burst_timeline: list[tuple[str, float, float]] = []
+        scene_clock = 0.0
         ext = ".wav" if narrator_name == "piper_tts" else ".mp3"
         if narrator_name == "piper_tts":
             voice = piper_voice
@@ -929,28 +973,37 @@ class ZeroKeyVideo(BaseTool):
                 # 按短句分别合成再拼接，还原真人口播的顿挫感
                 bursts = narration_bursts(text)
                 pieces: list[Path] = []
+                gap_len = float(inputs.get("burst_gap") or 0.22)
+                cursor = scene_clock   # 该镜在整条音轨上的起点
                 for bi, burst in enumerate(bursts, 1):
                     bp = work / f"scene_{i:03d}_b{bi:02d}{ext}"
-                    br = narrator.execute(_tts_inputs(narrator_name, burst, bp, voice))
+                    br = _tts_with_retry(narrator, _tts_inputs(narrator_name, burst, bp, voice))
                     if not br.success or not bp.exists():
                         return ToolResult(success=False,
                                           error=f"第{i}镜第{bi}句配音失败（{narrator_name}）：{br.error}")
                     pieces.append(bp)
+                    # 记录这句的真实起止，字幕据此对齐（不再按字数估算）
+                    bd = _probe_duration(bp)
+                    burst_timeline.append((burst, cursor, cursor + bd))
+                    cursor += bd
                     # 句间插一小段静音；末句不插，避免镜尾拖沓
                     if bi < len(bursts):
                         gap = work / f"scene_{i:03d}_g{bi:02d}{ext}"
-                        if _silence(float(inputs.get("burst_gap") or 0.22), gap):
+                        if _silence(gap_len, gap):
                             pieces.append(gap)
+                            cursor += gap_len
                 _concat_audio(pieces, wav)
             else:
-                r = narrator.execute(_tts_inputs(narrator_name, text, wav, voice))
+                r = _tts_with_retry(narrator, _tts_inputs(narrator_name, text, wav, voice))
                 if not r.success or not wav.exists():
                     return ToolResult(success=False,
                                       error=f"第{i}镜配音失败（{narrator_name}）：{r.error}")
 
             wavs.append(wav)
-            durations.append(_probe_duration(wav))
+            scene_dur = _probe_duration(wav)
+            durations.append(scene_dur)
             voiced.append(sc)
+            scene_clock += scene_dur
 
         if not wavs:
             return ToolResult(success=False, error="没有可配音的文本")
@@ -1031,8 +1084,13 @@ class ZeroKeyVideo(BaseTool):
         cuts = build_cuts(scenes, durations, inputs.get("title") or brief.title,
                           theme, footage, credits)
         title_offset = TITLE_SECONDS if (inputs.get("title") or brief.title) else 0
-        captions = (build_captions(scenes, durations, title_offset)
-                    if inputs.get("captions", True) else [])
+        if not inputs.get("captions", True):
+            captions = []
+        elif burst_timeline:
+            # 有真实短句时间轴就用它，比按字数估算准得多
+            captions = captions_from_bursts(burst_timeline, title_offset)
+        else:
+            captions = build_captions(scenes, durations, title_offset)
 
         # ---- 4.5 配乐 ----
         total_seconds = cuts[-1]["out_seconds"] if cuts else 0
