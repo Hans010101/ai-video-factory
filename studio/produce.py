@@ -854,6 +854,10 @@ class ZeroKeyVideo(BaseTool):
             "voice_provider": {"type": "string", "enum": ["auto", "elevenlabs_tts", "piper_tts"],
                                "default": "auto",
                                "description": "auto 优先 ElevenLabs（中文自然度高），无密钥时退回本地 Piper"},
+            "quality_check": {"type": "boolean", "default": True,
+                              "description": "交付前自动核验：轨道、分辨率、拼接杂音、字幕同步、静默降级"},
+            "quality_check_deep": {"type": "boolean", "default": True,
+                                   "description": "深度核验会转录成片比对字幕时间轴，慢但能抓出错位"},
             "caption_font_size": {"type": "number", "default": 56,
                                   "description": "字幕字号（1080p 下 56 较清晰，手机观看也够大）"},
             "captions": {"type": "boolean", "default": True,
@@ -1044,7 +1048,18 @@ class ZeroKeyVideo(BaseTool):
         # 的流拷贝把 MP3 数据塞进 WAV 容器，直接报
         # "Could not write header (incorrect codec parameters?)"。
         narration = public_dir / f"{run_id}_narration{ext}"
-        total_audio = _concat_audio(wavs, narration)
+        # 片头标题占用的时间必须用真实静音垫出来。
+        # 不能靠 props 里的 audio.narration.offsetSeconds —— Remotion 的
+        # Audio 组件只读 src 和 volume，那个字段会被静默忽略，结果就是
+        # 音频从 0 秒就播、字幕却晚了一个片头时长，全片对不上。
+        title_offset = TITLE_SECONDS if (inputs.get("title") or brief.title) else 0
+        parts = list(wavs)
+        if title_offset > 0:
+            lead = work / f"lead_silence{ext}"
+            if _silence(title_offset, lead):
+                parts.insert(0, lead)
+
+        total_audio = _concat_audio(parts, narration)
         normalized = _normalize_narration(narration) if inputs.get("normalize_audio", True) else False
         if normalized:
             total_audio = _probe_duration(narration)
@@ -1105,7 +1120,6 @@ class ZeroKeyVideo(BaseTool):
         # ---- 4. 构造 Remotion props ----
         cuts = build_cuts(scenes, durations, inputs.get("title") or brief.title,
                           theme, footage, credits)
-        title_offset = TITLE_SECONDS if (inputs.get("title") or brief.title) else 0
         if not inputs.get("captions", True):
             captions = []
         elif burst_timeline:
@@ -1165,8 +1179,35 @@ class ZeroKeyVideo(BaseTool):
             tail = (proc.stderr or proc.stdout or "")[-600:]
             return ToolResult(success=False, error=f"Remotion 渲染失败：{tail}")
 
-        # 成片已落盘，清掉本次的中间素材 —— public/ 会被打进每次渲染的
-        # webpack bundle，堆积几十 MB 的旧素材会让后续渲染越来越慢。
+        # ---- 交付前自检 ----
+        # 注意顺序：必须在清理中间文件之前跑，质检要读旁白音轨。
+        # 渲染返回成功不等于片子能看：字幕错位、拼接杂音、配乐悄悄没了，
+        # 这些都只有核一遍才发现。把过去踩过的坑固化成检查项。
+        qc_report: dict[str, Any] = {}
+        if inputs.get("quality_check", True):
+            try:
+                from studio import qc
+                qc_report = qc.inspect(
+                    out_path,
+                    data={"music": (music or {}).get("source") or "无",
+                          "scenes": len(scenes),
+                          "footage_used": sum(1 for f in footage if f),
+                          "captions": len(captions),
+                          "generation_errors": list(dict.fromkeys(_GEN_ERRORS))[:4],
+                          "narrator_fallbacks": tts_notes},
+                    captions=captions,
+                    deep=bool(inputs.get("quality_check_deep", True)),
+                    # 必须在清理中间文件之前跑：旁白音轨是干净的，
+                    # 用它核对同步比转录混了配乐的成片可靠得多
+                    narration=narration,
+                    expected_lead=title_offset,
+                )
+            except Exception as exc:
+                qc_report = {"passed": None, "issues": [
+                    {"level": "warn", "item": "质检", "detail": f"质检未能运行：{exc}"}]}
+
+        # 质检读完了才能清理 —— public/ 会被打进每次渲染的 webpack bundle，
+        # 堆积几十 MB 旧素材会让后续渲染越来越慢。
         for leftover in public_dir.glob(f"{run_id}*"):
             try:
                 leftover.unlink()
@@ -1177,6 +1218,7 @@ class ZeroKeyVideo(BaseTool):
             success=True,
             data={
                 "video": str(out_path),
+                "qc": qc_report,
                 "scenes": len(scenes),
                 "narration_seconds": round(total_audio, 2),
                 "video_seconds": round(cuts[-1]["out_seconds"], 2) if cuts else 0,
