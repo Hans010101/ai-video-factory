@@ -325,10 +325,16 @@ def fetch_footage(query: str, out_dir: Path, index: int,
 # Imagen $0.04/张，而 Veo $2.0/段 —— 5 镜的片子就是 $0.2 对 $10。
 # gemini_image 排在 google_imagen 前面：后者调的 Imagen `:predict` 端点已对
 # 新 Google 账户停止开放（404 no longer available to new users）。
-# flux_image 排首位：出插画质量最好，且 fal.ai 是按量付费没有免费额度耗尽
-# 的问题 —— Gemini 免费额度用完会 429，OpenAI 有账单硬上限，两条都会突然断。
+# 出图按「成本 × 质量」排序，实测同一提示词的结果：
+#   dashscope_image  $0.020  阿里云 Qwen-Image，情绪表达最贴中文语境
+#   flux_image(dev)  $0.030  质量相当
+#   gemini_image     免费    额度小，用完就 429
+#   flux-pro/v1.1    $0.050  质量没有明显优势，不值这个价
+#   openai_image     $0.211  最贵，且该账户有账单硬上限
+# 把便宜的排前面能把每条片子的画面成本从 $0.40 压到 $0.16。
 AI_FALLBACK_TOOLS = {
-    "image": ("flux_image", "gemini_image", "google_imagen", "openai_image", "image_gen"),
+    "image": ("dashscope_image", "gemini_image", "flux_image",
+              "google_imagen", "openai_image", "image_gen"),
     "video": ("gemini_omni_video", "sora_video", "veo_video"),
 }
 
@@ -358,6 +364,19 @@ def generate_shot(query: str, out_dir: Path, index: int, kind: str,
 
         inputs: dict[str, Any] = {"prompt": query,
                                   "output_path": str(out_dir / f"{prefix}_{index:03d}{suffix}")}
+        if name == "dashscope_image":
+            # 尺寸用星号分隔且要精确 16:9；watermark=False 关掉右下角水印。
+            # prompt_extend 会让模型自行扩写提示词，风格容易跑偏，关掉。
+            inputs.update({
+                "size": "1440*810",
+                "watermark": False,
+                "prompt_extend": False,
+                "negative_prompt": "text, letters, chinese characters, words, "
+                                   "watermark, logo, signature, cut off head, "
+                                   "deformed hands, extra limbs",
+            })
+        if name == "gemini_image":
+            inputs.setdefault("aspect_ratio", "16:9")
         if name == "flux_image":
             # 正向提示词里写 "no text" 压不住 —— FLUX 仍会在画框、招牌上生成
             # 乱码汉字，非常出戏。负向提示词才是有效手段。
