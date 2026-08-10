@@ -133,13 +133,28 @@ def _normalize_narration(path: Path) -> bool:
     失败时保留原文件 —— 响度不完美也好过没有旁白。
     """
     tmp = path.with_name(path.stem + "_norm" + path.suffix)
+    # 链路顺序有讲究：先去嘶声再做响度，反过来的话 loudnorm 已经把齿音
+    # 抬起来了，再压就是压过的声音。
+    #   deesser        —— 抑制 4-10kHz 的齿音（TTS 的「吱吱声」主要在这）
+    #   highpass 80Hz  —— 切掉人声用不到的低频隆隆声，听感更干净
+    #   loudnorm       —— I=-16 播客口播标准，TP=-1.5 留削峰余量
+    # 顺序：先切低频隆隆 → 压齿音 → 再做响度。
+    # loudnorm 会把整体抬约 8dB，齿音也跟着上来，所以必须放在它之前压。
+    chain = ("highpass=f=80,"
+             "deesser=i=0.6:m=0.5:f=0.3,"
+             "loudnorm=I=-16:TP=-1.5:LRA=11")
     proc = subprocess.run(
-        ["ffmpeg", "-y", "-i", str(path),
-         # I=-16 是播客/口播常用目标，TP=-1.5 留足削峰余量
-         "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
-         "-ar", "44100", str(tmp)],
+        ["ffmpeg", "-y", "-i", str(path), "-af", chain, "-ar", "44100", str(tmp)],
         capture_output=True, text=True, timeout=300,
     )
+    if proc.returncode != 0:
+        # 老版本 ffmpeg 没有 deesser，退回不含它的链路
+        proc = subprocess.run(
+            ["ffmpeg", "-y", "-i", str(path),
+             "-af", "highpass=f=80,loudnorm=I=-16:TP=-1.5:LRA=11",
+             "-ar", "44100", str(tmp)],
+            capture_output=True, text=True, timeout=300,
+        )
     if proc.returncode == 0 and tmp.exists() and tmp.stat().st_size > 1000:
         tmp.replace(path)
         return True
@@ -162,15 +177,20 @@ def _concat_audio(parts: list[Path], out_path: Path) -> float:
             fh.write("file '{}'\n".format(p.resolve().as_posix().replace("'", r"'\''")))
         list_file = fh.name
     try:
-        # 必须重编码，不能流拷贝：各家 TTS 的产物编码并不一致 —— DashScope
-        # 返回的是 24kHz PCM 裸数据（哪怕文件名是 .mp3），而我们插入的静音
-        # 是真 MP3，混在一起做 -c copy 会报 "Invalid audio stream"。
-        # 统一重编码到 44.1kHz 单声道，顺带把采样率也拉齐。
-        proc = subprocess.run(
-            ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_file,
-             "-ar", "44100", "-ac", "1", str(out_path)],
-            capture_output=True, text=True, timeout=300,
-        )
+        # 不能用 concat 分离器：它不做重采样，要求各段参数完全一致。
+        # DashScope 返回 24kHz PCM（哪怕文件名是 .mp3），我们插入的静音是
+        # 44.1kHz —— 混着拼会产生可听见的杂音。
+        # 改用 concat 滤镜：每一路先各自重采样对齐，再拼，格式差异被吃掉。
+        cmd = ["ffmpeg", "-y"]
+        for p in parts:
+            cmd += ["-i", str(p.resolve())]
+        n = len(parts)
+        filt = "".join(f"[{i}:a]aformat=sample_fmts=s16:sample_rates=44100:"
+                       f"channel_layouts=mono[a{i}];" for i in range(n))
+        filt += "".join(f"[a{i}]" for i in range(n)) + f"concat=n={n}:v=0:a=1[out]"
+        cmd += ["-filter_complex", filt, "-map", "[out]",
+                "-ar", "44100", "-ac", "1", str(out_path)]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
         if proc.returncode != 0 or not out_path.exists():
             raise RuntimeError(f"拼接旁白失败：{(proc.stderr or '')[-400:]}")
     finally:
@@ -834,6 +854,8 @@ class ZeroKeyVideo(BaseTool):
             "voice_provider": {"type": "string", "enum": ["auto", "elevenlabs_tts", "piper_tts"],
                                "default": "auto",
                                "description": "auto 优先 ElevenLabs（中文自然度高），无密钥时退回本地 Piper"},
+            "caption_font_size": {"type": "number", "default": 56,
+                                  "description": "字幕字号（1080p 下 56 较清晰，手机观看也够大）"},
             "captions": {"type": "boolean", "default": True,
                          "description": "生成跟随旁白的同步字幕（而不是把整段文案铺在画面上）"},
             "music": {"type": "boolean", "default": True, "description": "自动配背景音乐"},
@@ -1109,6 +1131,7 @@ class ZeroKeyVideo(BaseTool):
             "captions": captions,
             # caption 单位是短句不是单词，一次出 2 条正好一行
             "captionsPerPage": int(inputs.get("captions_per_page") or 2),
+            "captionFontSize": int(inputs.get("caption_font_size") or 56),
             "audio": {
                 "narration": {
                     "src": narration_src,

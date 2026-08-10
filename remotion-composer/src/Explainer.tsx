@@ -839,7 +839,8 @@ export const Explainer: React.FC<ExplainerProps> = (props) => {
           // 每页词数可由 props 覆盖：当 caption 单位是「短句」而不是「单词」时，
           // 6 条会占满两行，读起来很累。
           wordsPerPage={(props as { captionsPerPage?: number }).captionsPerPage ?? 6}
-          fontSize={42}
+          // 1080p 上 42px 偏小，手机竖屏观看时更吃力；字幕大小也开放给 props
+          fontSize={(props as { captionFontSize?: number }).captionFontSize ?? 56}
           highlightColor={theme.captionHighlightColor}
           backgroundColor={theme.captionBackgroundColor}
         />
