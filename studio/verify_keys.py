@@ -146,7 +146,19 @@ def _google_sa(path: str) -> tuple[str, str]:
     return OK, f"服务账号 {data.get('client_email', '')[:40]}"
 
 
+def _dashscope(key: str) -> tuple[str, str]:
+    # 用兼容 OpenAI 的 models 端点探测：免费、幂等、不消耗 TTS 额度
+    code, body = _get("https://dashscope.aliyuncs.com/compatible-mode/v1/models",
+                      {"Authorization": f"Bearer {key}"})
+    if code == 200:
+        return OK, "可用（Qwen-TTS 中文原生配音）"
+    if code in (401, 403):
+        return BAD, "密钥无效或未开通服务"
+    return UNKNOWN, f"无法确认（HTTP {code}）"
+
+
 VERIFIERS: dict[str, Callable[[str], tuple[str, str]]] = {
+    "DASHSCOPE_API_KEY": _dashscope,
     "ELEVENLABS_API_KEY": _elevenlabs,
     "OPENAI_API_KEY": _openai,
     "GOOGLE_API_KEY": _google_ai,
