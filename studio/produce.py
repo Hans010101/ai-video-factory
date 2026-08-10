@@ -70,6 +70,28 @@ def _probe_duration(path: Path) -> float:
         return 0.0
 
 
+def _normalize_narration(path: Path) -> bool:
+    """把旁白响度统一到播客标准（-16 LUFS）。
+
+    逐镜生成的音频响度会有起伏，直接拼接后忽大忽小。做一遍 loudnorm 还能
+    压掉句首的爆音、抬起气声段落，听感稳很多。
+    失败时保留原文件 —— 响度不完美也好过没有旁白。
+    """
+    tmp = path.with_name(path.stem + "_norm" + path.suffix)
+    proc = subprocess.run(
+        ["ffmpeg", "-y", "-i", str(path),
+         # I=-16 是播客/口播常用目标，TP=-1.5 留足削峰余量
+         "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
+         "-ar", "44100", str(tmp)],
+        capture_output=True, text=True, timeout=300,
+    )
+    if proc.returncode == 0 and tmp.exists() and tmp.stat().st_size > 1000:
+        tmp.replace(path)
+        return True
+    tmp.unlink(missing_ok=True)
+    return False
+
+
 def _concat_audio(parts: list[Path], out_path: Path) -> float:
     """把逐镜旁白拼成一条完整音轨。
 
@@ -315,9 +337,21 @@ NARRATOR_CHAIN = ("elevenlabs_tts", "google_tts", "openai_tts", "piper_tts")
 # 账户自有的 premade 音色则完全可用，所以这里主动选一个自有音色。
 _EL_LIBRARY_DEFAULT = "21m00Tcm4TlvDq8ikWAM"
 
-# 默认男声：Daniel，播音腔、正式、中文咬字清晰，适合观点与解说类内容。
+# 默认男声：Eric，沉稳可信，适合观点与情感解说。
 # 账户自有音色，免费额度可用。改音色只需传 voice_model。
-_EL_PREFERRED_VOICE = "onwK4e9ZLuTAKqWW03F9"
+_EL_PREFERRED_VOICE = "cjVigY5qzO86Huf0OWal"
+
+# 中文观点类内容的配音调参：
+#   stability 偏高 —— 低了会忽快忽慢、情绪飘忽，听感不稳
+#   similarity_boost 偏高 —— 保持音色一致，逐镜生成时不会前后不像同一个人
+#   style 压低 —— 风格化会带来夸张的抑扬顿挫，对理性叙述是干扰
+#   speed 略慢 —— 中文信息密度高，原速容易赶，留出理解余量
+_EL_VOICE_SETTINGS = {
+    "stability": 0.62,
+    "similarity_boost": 0.85,
+    "style": 0.08,
+    "speed": 0.94,
+}
 
 
 def elevenlabs_voice() -> str:
@@ -371,6 +405,8 @@ def _tts_inputs(name: str, text: str, out_path: Path, voice: str) -> dict[str, A
     if name == "elevenlabs_tts":
         # 多语种模型，中文才有可用的发音
         job.setdefault("model_id", "eleven_multilingual_v2")
+        for k, v in _EL_VOICE_SETTINGS.items():
+            job.setdefault(k, v)
     return job
 
 
@@ -674,6 +710,8 @@ class ZeroKeyVideo(BaseTool):
             "captions": {"type": "boolean", "default": True,
                          "description": "生成跟随旁白的同步字幕（而不是把整段文案铺在画面上）"},
             "music": {"type": "boolean", "default": True, "description": "自动配背景音乐"},
+            "normalize_audio": {"type": "boolean", "default": True,
+                                "description": "旁白响度统一到 -16 LUFS，避免逐镜生成后忽大忽小"},
             "music_mood": {"type": "string",
                            "description": "配乐风格描述，留空用「calm cinematic ambient emotional piano」"},
             "auto_split": {"type": "boolean", "default": True,
@@ -816,6 +854,9 @@ class ZeroKeyVideo(BaseTool):
         run_id = f"{out_path.stem}_{uuid.uuid4().hex[:8]}"
         narration = public_dir / f"{run_id}_narration.wav"
         total_audio = _concat_audio(wavs, narration)
+        normalized = _normalize_narration(narration) if inputs.get("normalize_audio", True) else False
+        if normalized:
+            total_audio = _probe_duration(narration)
         narration_src = f"studio/{narration.name}"
 
         # ---- 3. 抓真实素材（免费源，无需密钥）----
