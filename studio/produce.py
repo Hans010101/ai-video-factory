@@ -329,7 +329,23 @@ def generate_shot(query: str, out_dir: Path, index: int, kind: str,
 # 按中文自然度排序，Piper 永远垫底兜底。
 # 「可用」只代表密钥在，不代表能调通 —— 额度耗尽会在真正请求时才报 402/429，
 # 所以必须在运行时逐个试，不能只看状态。
-NARRATOR_CHAIN = ("elevenlabs_tts", "google_tts", "openai_tts", "piper_tts")
+# 中文原生厂商排在最前：ElevenLabs 的音色都是英语母语者，多语种模型说
+# 中文始终带口音和别扭的重音，这是训练数据决定的，调参救不了。
+# 阿里云 Qwen-TTS 与豆包都是中文原生训练，播音质感完全不同。
+NARRATOR_CHAIN = ("dashscope_tts", "doubao_tts", "elevenlabs_tts",
+                  "google_tts", "openai_tts", "piper_tts")
+
+# 中文原生音色的默认选择与播报风格
+_CN_TTS_DEFAULTS = {
+    "dashscope_tts": {
+        "model": "qwen3-tts-instruct-flash",   # instruct 版支持自然语言指导播报风格
+        "voice": "Ethan",                      # 男声
+        "language_type": "Chinese",
+        "instructions": "沉稳、理性、克制的男声，语速偏慢，像纪录片解说，"
+                        "重点处稍作停顿，不夸张不煽情。",
+    },
+    "doubao_tts": {},
+}
 
 # ElevenLabs 工具默认用 Rachel（21m00Tcm4TlvDq8ikWAM），那是「音色库音色」，
 # 免费账户通过 API 调用会直接 402：
@@ -398,6 +414,13 @@ def narrator_candidates(preferred: str = "auto") -> list[tuple[Any, str]]:
 
 def _tts_inputs(name: str, text: str, out_path: Path, voice: str) -> dict[str, Any]:
     job: dict[str, Any] = {"text": text, "output_path": str(out_path)}
+
+    if name in _CN_TTS_DEFAULTS:
+        job.update(_CN_TTS_DEFAULTS[name])
+        if voice:
+            job["voice"] = voice   # 手动指定时覆盖默认音色
+        return job
+
     if name == "piper_tts":
         job["model"] = voice
     elif voice:
@@ -825,6 +848,8 @@ class ZeroKeyVideo(BaseTool):
             voice = piper_voice
         elif narrator_name == "elevenlabs_tts":
             voice = el_voice
+        elif narrator_name in _CN_TTS_DEFAULTS:
+            voice = inputs.get("voice_model") or ""   # 空则用 _CN_TTS_DEFAULTS 里的默认音色
         else:
             voice = inputs.get("voice_model") or ""
         for i, sc in enumerate(scene_dicts, 1):
