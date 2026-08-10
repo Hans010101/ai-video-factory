@@ -70,6 +70,61 @@ def _probe_duration(path: Path) -> float:
         return 0.0
 
 
+# 参考真人口播实测：单句中位 10 字、语速 5.95 字/秒。
+# 把整段 50 多字一次喂给 TTS，模型会读成一条长句，没有停顿也没有重音；
+# 拆成短句分别合成再用静音拼接，才能还原「一顿一顿」的口播节奏。
+_CLAUSE_SPLIT = re.compile(r"(?<=[，。！？；：、])")
+_BURST_TARGET = 12      # 单个语音块的目标字数
+_BURST_MAX = 18
+
+
+def narration_bursts(text: str) -> list[str]:
+    """把一段旁白切成适合逐句合成的短块。"""
+    out: list[str] = []
+    buf = ""
+    for piece in _CLAUSE_SPLIT.split(text):
+        piece = piece.strip()
+        if not piece:
+            continue
+        if not buf:
+            buf = piece
+        elif len(buf) + len(piece) <= _BURST_TARGET:
+            buf += piece
+        else:
+            out.append(buf)
+            buf = piece
+    if buf:
+        out.append(buf)
+
+    # 没有标点的超长块只能按字数硬断
+    final: list[str] = []
+    for b in out:
+        while len(b) > _BURST_MAX:
+            final.append(b[:_BURST_TARGET])
+            b = b[_BURST_TARGET:]
+        if b:
+            final.append(b)
+    return final
+
+
+def _silence(seconds: float, out_path: Path, sample_rate: int = 44100) -> bool:
+    """生成一段静音。
+
+    必须显式指定编码器：anullsrc 默认输出的采样格式 mp3 容器不接受，
+    不指定会报 "Could not write header (incorrect codec parameters?)"。
+    另外静音片段要和语音片段编码一致，否则 concat 流拷贝会失败。
+    """
+    codec = ["-c:a", "libmp3lame", "-b:a", "192k"] if out_path.suffix == ".mp3" \
+        else ["-c:a", "pcm_s16le"]
+    proc = subprocess.run(
+        ["ffmpeg", "-y", "-f", "lavfi",
+         "-i", f"anullsrc=r={sample_rate}:cl=mono",
+         "-t", f"{seconds:.3f}", *codec, str(out_path)],
+        capture_output=True, text=True, timeout=60,
+    )
+    return proc.returncode == 0 and out_path.exists()
+
+
 def _normalize_narration(path: Path) -> bool:
     """把旁白响度统一到播客标准（-16 LUFS）。
 
@@ -107,9 +162,13 @@ def _concat_audio(parts: list[Path], out_path: Path) -> float:
             fh.write("file '{}'\n".format(p.resolve().as_posix().replace("'", r"'\''")))
         list_file = fh.name
     try:
+        # 必须重编码，不能流拷贝：各家 TTS 的产物编码并不一致 —— DashScope
+        # 返回的是 24kHz PCM 裸数据（哪怕文件名是 .mp3），而我们插入的静音
+        # 是真 MP3，混在一起做 -c copy 会报 "Invalid audio stream"。
+        # 统一重编码到 44.1kHz 单声道，顺带把采样率也拉齐。
         proc = subprocess.run(
             ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_file,
-             "-c", "copy", str(out_path)],
+             "-ar", "44100", "-ac", "1", str(out_path)],
             capture_output=True, text=True, timeout=300,
         )
         if proc.returncode != 0 or not out_path.exists():
@@ -341,8 +400,12 @@ _CN_TTS_DEFAULTS = {
         "model": "qwen3-tts-instruct-flash",   # instruct 版支持自然语言指导播报风格
         "voice": "Ethan",                      # 男声
         "language_type": "Chinese",
-        "instructions": "沉稳、理性、克制的男声，语速偏慢，像纪录片解说，"
-                        "重点处稍作停顿，不夸张不煽情。",
+        # 参照真人口播的实测特征写指令：短句推进、重音落在关键词、
+        # 句尾略微下沉。「像在跟朋友讲道理」比「像纪录片解说」更贴这类
+        # 观点内容 —— 纪录片腔太端着，缺少代入感。
+        "instructions": "自然、有分寸的中年男声，像在跟朋友认真讲道理。"
+                        "短句推进，关键词加重语气，句尾略微下沉。"
+                        "有情绪起伏但不煽情，不用播音腔，不拖长音。",
     },
     "doubao_tts": {},
 }
@@ -733,6 +796,10 @@ class ZeroKeyVideo(BaseTool):
             "captions": {"type": "boolean", "default": True,
                          "description": "生成跟随旁白的同步字幕（而不是把整段文案铺在画面上）"},
             "music": {"type": "boolean", "default": True, "description": "自动配背景音乐"},
+            "burst_pacing": {"type": "boolean", "default": True,
+                             "description": "按短句分别合成再拼接，还原真人口播的顿挫感（参考真人实测：单句中位 10 字）"},
+            "burst_gap": {"type": "number", "default": 0.22,
+                          "description": "句间停顿秒数，调大更沉稳、调小更紧凑"},
             "normalize_audio": {"type": "boolean", "default": True,
                                 "description": "旁白响度统一到 -16 LUFS，避免逐镜生成后忽大忽小"},
             "music_mood": {"type": "string",
@@ -857,9 +924,30 @@ class ZeroKeyVideo(BaseTool):
             if not text:
                 continue
             wav = work / f"scene_{i:03d}{ext}"
-            r = narrator.execute(_tts_inputs(narrator_name, text, wav, voice))
-            if not r.success or not wav.exists():
-                return ToolResult(success=False, error=f"第{i}镜配音失败（{narrator_name}）：{r.error}")
+
+            if inputs.get("burst_pacing", True):
+                # 按短句分别合成再拼接，还原真人口播的顿挫感
+                bursts = narration_bursts(text)
+                pieces: list[Path] = []
+                for bi, burst in enumerate(bursts, 1):
+                    bp = work / f"scene_{i:03d}_b{bi:02d}{ext}"
+                    br = narrator.execute(_tts_inputs(narrator_name, burst, bp, voice))
+                    if not br.success or not bp.exists():
+                        return ToolResult(success=False,
+                                          error=f"第{i}镜第{bi}句配音失败（{narrator_name}）：{br.error}")
+                    pieces.append(bp)
+                    # 句间插一小段静音；末句不插，避免镜尾拖沓
+                    if bi < len(bursts):
+                        gap = work / f"scene_{i:03d}_g{bi:02d}{ext}"
+                        if _silence(float(inputs.get("burst_gap") or 0.22), gap):
+                            pieces.append(gap)
+                _concat_audio(pieces, wav)
+            else:
+                r = narrator.execute(_tts_inputs(narrator_name, text, wav, voice))
+                if not r.success or not wav.exists():
+                    return ToolResult(success=False,
+                                      error=f"第{i}镜配音失败（{narrator_name}）：{r.error}")
+
             wavs.append(wav)
             durations.append(_probe_duration(wav))
             voiced.append(sc)
@@ -877,7 +965,10 @@ class ZeroKeyVideo(BaseTool):
         # shot_001 这种名字会让同时跑的任务互相覆盖，而且上一轮遗留的
         # 同名不同扩展名文件（.png / .mp4）也会污染这一轮。
         run_id = f"{out_path.stem}_{uuid.uuid4().hex[:8]}"
-        narration = public_dir / f"{run_id}_narration.wav"
+        # 后缀必须跟随 TTS 产物：云端 TTS 出 mp3，写死 .wav 会让 concat
+        # 的流拷贝把 MP3 数据塞进 WAV 容器，直接报
+        # "Could not write header (incorrect codec parameters?)"。
+        narration = public_dir / f"{run_id}_narration{ext}"
         total_audio = _concat_audio(wavs, narration)
         normalized = _normalize_narration(narration) if inputs.get("normalize_audio", True) else False
         if normalized:
