@@ -224,8 +224,10 @@ def fetch_footage(query: str, out_dir: Path, index: int,
 # Imagen $0.04/张，而 Veo $2.0/段 —— 5 镜的片子就是 $0.2 对 $10。
 # gemini_image 排在 google_imagen 前面：后者调的 Imagen `:predict` 端点已对
 # 新 Google 账户停止开放（404 no longer available to new users）。
+# flux_image 排首位：出插画质量最好，且 fal.ai 是按量付费没有免费额度耗尽
+# 的问题 —— Gemini 免费额度用完会 429，OpenAI 有账单硬上限，两条都会突然断。
 AI_FALLBACK_TOOLS = {
-    "image": ("gemini_image", "google_imagen", "openai_image", "image_gen"),
+    "image": ("flux_image", "gemini_image", "google_imagen", "openai_image", "image_gen"),
     "video": ("gemini_omni_video", "sora_video", "veo_video"),
 }
 
@@ -255,6 +257,20 @@ def generate_shot(query: str, out_dir: Path, index: int, kind: str,
 
         inputs: dict[str, Any] = {"prompt": query,
                                   "output_path": str(out_dir / f"{prefix}_{index:03d}{suffix}")}
+        if name == "flux_image":
+            # 正向提示词里写 "no text" 压不住 —— FLUX 仍会在画框、招牌上生成
+            # 乱码汉字，非常出戏。负向提示词才是有效手段。
+            inputs["negative_prompt"] = (
+                "text, letters, chinese characters, words, captions, subtitles, "
+                "signage, poster text, watermark, logo, signature, "
+                "cropped subject, cut off head, extra limbs, deformed hands, blurry"
+            )
+            # 必须是严格 16:9，否则进片按 cover 裁剪会切掉主体。
+            # FLUX pro v1.1 的单边上限是 1440：要 1920x1080 会被压成
+            # 1440x1056（比例 1.36），要 1536x864 会被压成 1440x864（1.67），
+            # 两种都不是 16:9，进片仍会裁掉主体。1440x810 才是限额内的精确
+            # 16:9。Remotion 放大到 1080p 对插画完全够用。
+            inputs.update({"width": 1440, "height": 810})
         try:
             estimate = float(tool.estimate_cost(inputs) or 0.0)
         except Exception:
@@ -396,12 +412,15 @@ VISUAL_STYLES: dict[str, dict[str, str]] = {
     },
     "comic": {
         "label": "漫画插画",
+        # 反复强调无文字：模型很容易在招牌、海报上生成乱码汉字，非常出戏。
+        # 限定人物数量，否则它会自作主张塞满背景人物，冲淡主体。
         "prompt": ("Modern Chinese editorial comic illustration, clean bold linework, "
                    "flat muted color palette, warm neutral tones with one accent color, "
-                   "expressive but restrained character faces, full figures well composed "
-                   "within a 16:9 frame, generous negative space, no text, no watermark, "
-                   "cinematic staging. Scene: "),
-        "note": "AI 生成统一风格插画，构图完整可控，约 $0.04/张",
+                   "expressive but restrained faces, at most two people, subjects fully "
+                   "visible and centered, generous negative space, calm domestic setting. "
+                   "Absolutely no text, no letters, no signage, no captions, no watermark, "
+                   "no logos anywhere in the image. Scene: "),
+        "note": "AI 生成统一风格插画，构图完整可控，约 $0.05/张",
     },
     "cinematic": {
         "label": "电影质感",
