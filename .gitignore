@@ -106,3 +106,4 @@ projects/studio/
 .avf-token
 remotion-composer/public/studio/
 projects/container-out/
+.cache/

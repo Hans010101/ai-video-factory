@@ -134,11 +134,22 @@ class DashscopeImage(BaseTool):
             return ToolStatus.AVAILABLE
         return ToolStatus.UNAVAILABLE
 
+    # Per-image estimates by tier. A flat rate across every model made the
+    # reported cost meaningless once callers started picking a model, and it
+    # let the budget guard wave through images that cost several times the
+    # assumed rate. Confirm the current rates in the DashScope console.
+    _PRICE_PER_IMAGE = {
+        "qwen-image-max": 0.05,
+        "qwen-image-2.0-pro": 0.02,
+        "wan2.7-image": 0.02,
+        "z-image-turbo": 0.01,
+    }
+    _PRICE_FALLBACK = 0.05  # unknown model: assume the pricey tier, not the cheap one
+
     def estimate_cost(self, inputs: dict[str, Any]) -> float:
-        # Conservative per-image estimate; DashScope bills per image.
-        # Check the DashScope console for actual pricing.
         n = int(inputs.get("n", 1))
-        return n * 0.02
+        model = str(inputs.get("model") or "qwen-image-2.0-pro")
+        return n * self._PRICE_PER_IMAGE.get(model, self._PRICE_FALLBACK)
 
     def execute(self, inputs: dict[str, Any]) -> ToolResult:
         api_key = os.environ.get("DASHSCOPE_API_KEY")

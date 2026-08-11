@@ -70,6 +70,21 @@ _CN_NEGATION_RE = re.compile(
     rf"(?:\s*[、，,和或]\s*(?:无|没有|不要)?\s*{_CN_NEG_NOUN})*\s*[。，,、;；]?")
 
 
+# 引号里的内容会被当成「要画上去的字」。脚本的画面建议常写成
+# 「主角正面遭遇"感恩，不等于交出人生"的现实瞬间」，那句引文就原样出现在
+# 画面里，变成一张海报标题。中文出图模型（wan / qwen）尤其吃这一套，
+# 因为它们本来就擅长排版汉字。
+_QUOTED_RE = re.compile(r"[\"“”‘’'「」『』《》〈〉]+[^\"“”‘’'「」『』《》〈〉]*"
+                        r"[\"“”‘’'「」『』《》〈〉]+")
+
+
+def strip_quoted(text: str) -> str:
+    out = _QUOTED_RE.sub("", text)
+    out = re.sub(r"\s{2,}", " ", out)
+    out = re.sub(r"[、，,]{2,}", "，", out)
+    return out.strip(" ,.、，。")
+
+
 def strip_negation(text: str) -> str:
     out = _CN_NEGATION_RE.sub("", text)
     out = _NEGATION_RE.sub("", out)
@@ -155,10 +170,16 @@ STYLE_MEDIUM: dict[str, str] = {
 }
 
 # 否定只出现在这里。写进正向提示词会把这些东西召唤出来。
+# 中英各写一份。翻译（走 Gemini）配额耗尽时提示词会退回中文，
+# 这时纯英文负向压不住中文出图模型 —— 它们本来就擅长排版汉字，
+# 会把提示词里的句子当成要画的标题、把画面建议当成信息图的标注。
 NEGATIVE = ("text, letters, chinese characters, words, captions, signage, "
-            "watermark, logo, signature, "
+            "watermark, logo, signature, poster title, infographic, "
+            "diagram labels, callout lines, "
             "cut off head, cropped face, deformed hands, extra limbs, "
-            "crowd, background people")
+            "crowd, background people, "
+            "文字，汉字，字幕，标题，海报文字，标注，说明文字，引线，信息图，"
+            "水印，签名，人物出画，多余的手")
 
 
 # 角色一致性。方法取自 seedance-characters：身份锚点 = 年龄段 + 轮廓 +
@@ -247,7 +268,7 @@ def build(scene_text: str, style: str = "comic", subject_hint: str = "",
 
     subject = (subject_hint or "two people in a quiet apartment").strip()
     subject, _ = strip_slop(subject)
-    subject = strip_negation(subject)
+    subject = strip_negation(strip_quoted(subject))
 
     # 身份锚点必须逐镜原样复述 —— 模型不记得上一镜是谁，
     # 少写一次这一镜的人就换脸了。

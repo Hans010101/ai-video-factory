@@ -355,6 +355,23 @@ def _is_transient(message: str) -> bool:
     return any(k in low for k in _TRANSIENT)
 
 
+# 出图缓存。提示词、模型、尺寸、seed 全同 = 结果必然相同，没有理由再买一次。
+# 调脚本、调剪辑、调配音时会把同一条片子重出很多遍，画面部分不该跟着重复付费。
+# 只在给了 seed 时启用 —— 没给 seed 的调用本来就是要每次都不一样。
+_CACHE_DIR = Path(__file__).resolve().parent.parent / ".cache" / "shots"
+
+
+def _cache_path(tool_name: str, inputs: dict[str, Any], suffix: str) -> Optional[Path]:
+    if inputs.get("seed") is None:
+        return None
+    import hashlib
+    payload = {k: v for k, v in inputs.items() if k != "output_path"}
+    payload["__tool"] = tool_name
+    blob = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
+    digest = hashlib.sha256(blob.encode()).hexdigest()[:32]
+    return _CACHE_DIR / f"{digest}{suffix}"
+
+
 def generate_shot(query: str, out_dir: Path, index: int, kind: str,
                   budget_left: Optional[float],
                   prefix: str = "shot", negative: str = "",
@@ -393,6 +410,10 @@ def generate_shot(query: str, out_dir: Path, index: int, kind: str,
             # 尺寸用星号分隔且要精确 16:9；watermark=False 关掉右下角水印。
             # prompt_extend 会让模型自行扩写提示词，风格容易跑偏，关掉。
             inputs.update({
+                # 横评过 qwen-image-2.0-pro / wan2.7-image / z-image-turbo：
+                # wan2.7 出图最好（服装绑定准、16:9 满构图、环境细节完整），
+                # 也是这个账户唯一还有额度的一档，其余全部 Arrearage。
+                "model": "wan2.7-image",
                 "size": "1440*810",
                 "watermark": False,
                 "prompt_extend": False,
@@ -416,6 +437,13 @@ def generate_shot(query: str, out_dir: Path, index: int, kind: str,
             # 两种都不是 16:9，进片仍会裁掉主体。1440x810 才是限额内的精确
             # 16:9。Remotion 放大到 1080p 对插画完全够用。
             inputs.update({"width": 1440, "height": 810})
+        cached = _cache_path(name, inputs, suffix)
+        if cached and cached.exists() and cached.stat().st_size > 10_000:
+            shutil.copy2(cached, inputs["output_path"])
+            return {"file": Path(inputs["output_path"]).name, "tool": name,
+                    "source": f"AI 生成 · {name}（缓存）",
+                    "creator": "", "license": "", "url": ""}, 0.0
+
         try:
             estimate = float(tool.estimate_cost(inputs) or 0.0)
         except Exception:
@@ -448,6 +476,13 @@ def generate_shot(query: str, out_dir: Path, index: int, kind: str,
         if not path.exists() or path.stat().st_size < 10_000:
             _GEN_ERRORS.append(f"{name}: 产出文件缺失或过小")
             continue
+
+        if cached:
+            try:
+                _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(path, cached)
+            except OSError:
+                pass  # 缓存写不进去不该拖垮出片
 
         spent = float(result.cost_usd or estimate)
         return {
@@ -1214,6 +1249,21 @@ class ZeroKeyVideo(BaseTool):
                 footage.append(shot)
         else:
             footage = [None] * len(scenes)
+
+        # ---- 3a. 缺图的镜头沿用邻近镜头的画面 ----
+        # 出图失败时退回文字卡，正文和底部字幕是同一句话，看着像出了故障。
+        # 剪辑师遇到缺镜是复用邻近画面换个运镜，不是往屏幕上打字。
+        # 运镜按镜号取（KEN_BURNS_CYCLE[i % n]），复用后自然是另一个运镜。
+        if styled_queries and len(styled_queries) == len(footage):
+            for i, f in enumerate(footage):
+                if f:
+                    continue
+                near = next((footage[j] for j in range(i - 1, -1, -1) if footage[j]),
+                            None) or \
+                    next((footage[j] for j in range(i + 1, len(footage)) if footage[j]),
+                         None)
+                if near:
+                    footage[i] = dict(near)
 
         # ---- 3b. 补拍：把少数派画风的镜头统一掉 ----
         # 限流会让前几镜落在 A 家、后几镜落在 B 家，同一条片子出现两种画风。
