@@ -1220,9 +1220,15 @@ class ZeroKeyVideo(BaseTool):
                 query = f"{base} {own[:40]}".strip() if base and own else (base or own)
 
                 if style != "footage":
-                    # 生成式风格：整片统一，构图由提示词约束，不检索素材库
+                    # 生成式风格：整片统一，构图由提示词约束，不检索素材库。
+                    # 只喂画面建议，不喂旁白原句 —— query 里拼旁白是为了让
+                    # 素材检索更贴题，但对出图是有害的：中文出图模型会把整句
+                    # 话排版成画面里的标题和带引线的说明文字。旁白仍然单独
+                    # 传给 narration 用来判定情绪。
+                    subject_text = base or own
+                    styled_queries.append((subject_text, own))
                     shot, spent = generate_styled_shot(
-                        query, style, public_dir, i + 1, run_id, budget_left,
+                        subject_text, style, public_dir, i + 1, run_id, budget_left,
                         narration=own, cast=cast, seed=shot_seed + i,
                         prefer=locked_tool, medium=script_medium)
                     if shot:
@@ -1232,7 +1238,6 @@ class ZeroKeyVideo(BaseTool):
                         if budget_left is not None:
                             budget_left = max(budget_left - spent, 0.0)
                     footage.append(shot)
-                    styled_queries.append((query, own))
                     continue
 
                 shot = fetch_footage(query, public_dir, i + 1, run_id,

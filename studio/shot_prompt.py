@@ -31,6 +31,25 @@ SLOP_WORDS = (
 )
 
 
+# 中文版可见性检验。这些词相机拍不到，模型没法「画」出来，就退而求其次
+# 把它们**写**出来 —— 画面里出现「底层机制」四个大字的海报标题，根源在此。
+# 中文出图模型排版汉字是强项，所以这个倾向比英文模型明显得多。
+CN_SLOP_WORDS = (
+    "底层机制", "机制", "逻辑", "本质", "内核", "内在", "抽象",
+    "寓言式", "寓言", "象征意义", "象征", "隐喻", "意象", "概念",
+    "主体性", "边界感", "张力", "情绪张力", "现实瞬间", "画面感",
+    "叙事", "表达", "呈现", "体现", "传达", "映射",
+)
+_CN_SLOP_RE = re.compile("|".join(re.escape(w) for w in CN_SLOP_WORDS))
+
+
+def strip_cn_slop(text: str) -> str:
+    out = _CN_SLOP_RE.sub("", text)
+    out = re.sub(r"[、，,]{2,}", "，", out)
+    out = re.sub(r"[的地得]{2,}", "的", out)
+    return out.strip(" ,.、，。的")
+
+
 def strip_slop(text: str) -> tuple[str, list[str]]:
     """删掉空洞词，返回（清理后的文本, 被删的词）。"""
     removed: list[str] = []
@@ -268,7 +287,11 @@ def build(scene_text: str, style: str = "comic", subject_hint: str = "",
 
     subject = (subject_hint or "two people in a quiet apartment").strip()
     subject, _ = strip_slop(subject)
-    subject = strip_negation(strip_quoted(subject))
+    subject = strip_cn_slop(strip_negation(strip_quoted(subject)))
+    # 全被剥光说明这一镜的画面建议整句都是拍不到的概念。给个中性的具体
+    # 场景兜底，比把概念词丢给模型强 —— 后者只会把词写在画面上。
+    if len(subject) < 4:
+        subject = "两个人在安静的房间里相对而立"
 
     # 身份锚点必须逐镜原样复述 —— 模型不记得上一镜是谁，
     # 少写一次这一镜的人就换脸了。
