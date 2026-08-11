@@ -52,6 +52,18 @@ _SECTION_NARRATION = (
 _SECTION_LINE = re.compile(r"^\s*[\[【(]?\s*([^\s\[\]【】()：:]+)\s*[\]】)]?\s*[:：]?\s*$")
 
 
+# 专业脚本常用「统一风格 + 编号分镜表」的写法：
+#   统一风格：现代中国都市寓言插画，深墨绿…
+#   1. 钩子：主角正面遭遇…
+#   2. 冲突：双人构图，压力落到主角身上…
+# 编号条目是有序分镜，统一风格是全局前缀 —— 两者语义完全不同，
+# 混在一起当成一条画面建议会丢掉整个分镜设计。
+_GLOBAL_STYLE = re.compile(r"^\s*(?:统一风格|整体风格|全局风格|风格统一)\s*[:：]\s*(.+)$")
+_NUMBERED_SHOT = re.compile(
+    r"^\s*(\d+)\s*[.、)]\s*(?:([^：:]{1,8})\s*[:：])?\s*(.+)$"
+)
+
+
 def _section_role(line: str) -> str:
     """整行只有一个标记时，返回它引导的角色：narration / visual / 空。"""
     m = _SECTION_LINE.match(line)
@@ -184,6 +196,9 @@ def parse_brief(text: str) -> Brief:
     current: Optional[Scene] = None
     pending_blank = False
     section_role = ""   # 由「画面提示词」这类独占一行的标记设置
+    # 「统一风格」全局前缀，与有序的编号分镜表
+    global_style = ""
+    shot_list: list[tuple[str, str]] = []   # (节拍名, 画面描述)
 
     def ensure_scene() -> Scene:
         nonlocal current
@@ -216,6 +231,19 @@ def parse_brief(text: str) -> Brief:
             section_role = role
             pending_blank = False
             continue
+
+        # 在「画面」段落里遇到的两种专业写法要分开处理
+        if section_role == "visual":
+            gm = _GLOBAL_STYLE.match(stripped)
+            if gm:
+                global_style = gm.group(1).strip()
+                pending_blank = False
+                continue
+            sm = _NUMBERED_SHOT.match(stripped)
+            if sm:
+                shot_list.append(((sm.group(2) or "").strip(), sm.group(3).strip()))
+                pending_blank = False
+                continue
 
         # 去掉列表符号
         lm = _LIST_HEAD.match(stripped)
@@ -268,7 +296,60 @@ def parse_brief(text: str) -> Brief:
     brief.scenes = [s for s in scenes if s.narration or s.visual]
     for i, s in enumerate(brief.scenes, 1):
         s.index = i
+
+    # 脚本给了编号分镜表时，按它的节拍数重新分镜 —— 作者已经想好了
+    # 「钩子/冲突/机制/收束」怎么分，比我们按时长机械切分更贴内容。
+    if shot_list:
+        brief.scenes = _apply_shot_list(brief, shot_list, global_style)
+    elif global_style:
+        for s in brief.scenes:
+            s.visual = f"{global_style}，{s.visual}" if s.visual else global_style
+    brief.style = global_style
     return brief
+
+
+def _apply_shot_list(brief: Brief, shot_list: list[tuple[str, str]],
+                     global_style: str) -> list[Scene]:
+    """把整段旁白按编号分镜表的节拍数切开，与各镜画面一一对应。
+
+    切分只在句末标点处进行，并按各镜文字量均分 —— 让每一镜的时长大致相当，
+    不会出现一镜十秒、下一镜两秒的失衡。
+    """
+    narration = " ".join(s.narration for s in brief.scenes if s.narration).strip()
+    n = len(shot_list)
+    if not narration:
+        return [Scene(index=i + 1, title=name, visual=_join_style(global_style, vis))
+                for i, (name, vis) in enumerate(shot_list)]
+
+    sentences = [s for s in re.split(r"(?<=[。！？!?])\s*", narration) if s.strip()]
+    if not sentences:
+        sentences = [narration]
+
+    # 按累计字数把句子分配到 n 个桶里
+    target = max(len(narration) / n, 1)
+    buckets: list[list[str]] = [[] for _ in range(n)]
+    acc = 0.0
+    for sent in sentences:
+        idx = min(int(acc / target), n - 1)
+        buckets[idx].append(sent)
+        acc += len(sent)
+
+    out: list[Scene] = []
+    for i, (name, vis) in enumerate(shot_list):
+        out.append(Scene(
+            index=i + 1,
+            title=name,
+            narration="".join(buckets[i]).strip(),
+            visual=_join_style(global_style, vis),
+        ))
+    # 丢掉没有分到旁白的空镜，避免出现无声画面
+    return [s for s in out if s.narration or s.visual]
+
+
+def _join_style(global_style: str, shot_visual: str) -> str:
+    if global_style and shot_visual:
+        return f"{global_style}，{shot_visual}"
+    return shot_visual or global_style
 
 
 # ---------------- 能力推断与工具选型 ----------------

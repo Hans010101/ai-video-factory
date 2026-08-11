@@ -241,6 +241,8 @@ def split_long_scenes(scenes: list[dict[str, Any]],
         for i, chunk in enumerate(chunks):
             out.append({
                 **sc,
+                # 保留原节拍名，切出来的子镜共享同一个节拍身份
+                "title": sc.get("title") or "",
                 "narration": chunk,
                 # 画面建议只保留在首镜？不 —— 每镜都要有画面，共享同一条建议，
                 # 检索时按 variant 取不同候选即可。
