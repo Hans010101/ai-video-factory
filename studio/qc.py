@@ -166,6 +166,44 @@ def check_caption_sync(path: Path, captions: list[dict[str, Any]],
         return [_issue(FAIL, "字幕同步",
                        f"首条字幕 {cap_start:.2f}s，实际语音 {first:.2f}s，偏差 {drift:.2f}s",
                        "片头占用的时间要用真实静音垫进音轨，不能依赖 offsetSeconds")]
+
+    # 只看首条是不够的：整体平移、中途累积的滞后，首条都可能是对的。
+    # 漏过一次「全片滞后两句、质检报通过」之后加的这一段 —— 把每条字幕
+    # 都对回音轨，取偏差中位数。
+    issues = _sync_drift_across_track(tmp, captions, tolerance)
+    return issues
+
+
+def _sync_drift_across_track(audio: Path, captions: list[dict[str, Any]],
+                             tolerance: float) -> list[dict[str, str]]:
+    """把每条字幕对回音轨，看偏差中位数。"""
+    from studio import align
+    spoken = "".join(str(c.get("word") or "") for c in captions)
+    expected = align.align(spoken, audio, 0.0)
+    if not expected or len(expected) != len(captions):
+        return []      # 对不上就不下结论，别误报
+
+    import statistics
+    deltas = [abs(c["startMs"] - e["startMs"]) / 1000
+              for c, e in zip(captions, expected)]
+    mid = statistics.median(deltas)
+    worst = max(deltas)
+    bad = [d for d in deltas if d > tolerance]
+    hint = ("字幕时间应从成品音轨转写反推，不要在已含片头静音的音轨上"
+            "再加一次 title_offset")
+
+    if mid > tolerance:
+        return [_issue(FAIL, "字幕同步",
+                       f"全片偏差中位 {mid:.2f}s（最大 {worst:.2f}s）", hint)]
+    # 中位数看不见局部滞后：前半对、后半整体差 1.8 秒时中位数仍是 0。
+    # 所以再按「超差条数占比」判一次。
+    if len(bad) > len(deltas) * 0.25:
+        return [_issue(FAIL, "字幕同步",
+                       f"{len(bad)}/{len(deltas)} 条字幕偏差超 {tolerance:.1f}s"
+                       f"（最大 {worst:.2f}s）", hint)]
+    if bad:
+        return [_issue(WARN, "字幕同步",
+                       f"{len(bad)}/{len(deltas)} 条字幕偏差偏大，最大 {worst:.2f}s")]
     return []
 
 

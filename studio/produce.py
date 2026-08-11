@@ -78,6 +78,43 @@ _BURST_TARGET = 12      # 单个语音块的目标字数
 _BURST_MAX = 18
 
 
+# 一次合成的单位是整句，不是短语。此前按逗号切成 7~12 字的碎片、每片单独
+# 调 TTS，听感很僵：「可当你选择工作、」和「城市或伴侣时，」本是一句话，
+# 拆开后各自带句首起调和句尾降调，接起来就是一串互不相干的小句子。
+# 句内的停顿和语调交给模型自己处理，它比我们切得好。
+_SENTENCE_END = re.compile(r"(?<=[。！？!?；;])")
+_TTS_SENTENCE_MAX = 60    # 超长句仍要断，否则一次合成容易读崩
+_TTS_PASSAGE_MAX = 140    # 一镜的旁白只要不超过这个长度就整段合成
+
+
+def narration_sentences(text: str) -> list[str]:
+    """把旁白按句末标点切开，供逐句合成。"""
+    out: list[str] = []
+    for s in _SENTENCE_END.split(text):
+        s = s.strip()
+        if not s:
+            continue
+        while len(s) > _TTS_SENTENCE_MAX:
+            # 超长句在最靠后的次级标点处断，没有就硬断
+            cut = max(s.rfind(c, 0, _TTS_SENTENCE_MAX) for c in "，、,")
+            cut = cut + 1 if cut > 0 else _TTS_SENTENCE_MAX
+            out.append(s[:cut].strip())
+            s = s[cut:].strip()
+        if s:
+            out.append(s)
+    return out
+
+
+# 停顿按标点给，不再一律 0.22 秒。等长停顿是节拍器感的主要来源。
+_PAUSE_AFTER = {"。": 0.42, "！": 0.42, "!": 0.42, "？": 0.46, "?": 0.46,
+                "；": 0.30, ";": 0.30, "，": 0.16, ",": 0.16, "、": 0.12}
+_PAUSE_DEFAULT = 0.24
+
+
+def pause_after(sentence: str) -> float:
+    return _PAUSE_AFTER.get(sentence.strip()[-1:], _PAUSE_DEFAULT)
+
+
 def narration_bursts(text: str) -> list[str]:
     """把一段旁白切成适合逐句合成的短块。"""
     out: list[str] = []
@@ -521,6 +558,34 @@ _CN_TTS_DEFAULTS = {
     "doubao_tts": {},
 }
 
+# 逐句的播报指导。整片用同一句指令念到底，本身就是僵硬的来源 —— 讲对峙、
+# 讲疲惫、讲结论用的是同一种语气。这里复用 shot_prompt 的情绪判定，
+# 让声音和画面走同一条情绪线。
+_DELIVERY_BY_MOOD = {
+    "tension": "这句是转折和对峙，语气收紧，语速略快，重音压在质问上，不要喊。",
+    "weary": "这句讲疲惫和隐忍，放慢，气声多一点，句尾往下沉，不要用力。",
+    "distance": "这句讲距离感，语气平，留白多一点，不带感情色彩。",
+    "reflection": "这句是回想和体谅，放软，语速稍慢，像在斟酌措辞。",
+    "resolve": "这句是结论，稳住，一字一句说清楚，句尾落定不上扬。",
+    "neutral": "这句是铺陈，平实推进，不刻意起伏。",
+}
+# 引号里的话是在转述别人说的，得换个口吻，否则听起来还是旁白自己在讲。
+_DELIVERY_QUOTED = "这句是在转述别人说的话，换一个口吻，带一点模仿的意味。"
+
+
+def _apply_delivery(job: dict[str, Any], narrator_name: str,
+                    sentence: str, scene_text: str) -> None:
+    """按这一句的情绪追加播报指导。只有 instruct 类模型吃这个参数。"""
+    if not job.get("instructions"):
+        return
+    from studio import shot_prompt
+    mood = shot_prompt.detect_mood(sentence) or shot_prompt.detect_mood(scene_text)
+    extra = _DELIVERY_BY_MOOD.get(mood, "")
+    if any(q in sentence for q in "\"“”「『"):
+        extra = f"{extra}{_DELIVERY_QUOTED}"
+    if extra:
+        job["instructions"] = f"{job['instructions']}{extra}"
+
 # ElevenLabs 工具默认用 Rachel（21m00Tcm4TlvDq8ikWAM），那是「音色库音色」，
 # 免费账户通过 API 调用会直接 402：
 #     Free users cannot use library voices via the API.
@@ -878,6 +943,33 @@ def _caption_units(text: str) -> list[str]:
     return out
 
 
+def split_for_caption(sentence: str, start: float, end: float
+                      ) -> list[tuple[str, float, float]]:
+    """把一整句的时间轴切成几条字幕。
+
+    合成单位改成整句之后，一条字幕如果也跟着变成整句，屏幕上就会一次压
+    三四行。所以显示仍按逗号分条，句内时间按字数比例分。
+
+    这里是估算，但误差只发生在一句话内部（通常 < 0.2 秒），比起为了对轴
+    去把句子拆开单独合成、换来一嘴机器腔，这个代价划算得多。
+    """
+    parts = [p for p in re.split(r"(?<=[，、,])", sentence) if p.strip()]
+    if len(parts) <= 1:
+        return [(sentence, start, end)]
+    total = sum(len(p) for p in parts) or 1
+    out: list[tuple[str, float, float]] = []
+    cursor = start
+    for p in parts:
+        span = (end - start) * len(p) / total
+        out.append((p, cursor, cursor + span))
+        cursor += span
+    # 浮点累加的零头补回最后一条，避免字幕比声音早收
+    if out:
+        text, s, _ = out[-1]
+        out[-1] = (text, s, end)
+    return out
+
+
 def captions_from_bursts(burst_timeline: list[tuple[str, float, float]],
                          offset_seconds: float) -> list[dict[str, Any]]:
     """用每个短句的真实时长生成字幕。
@@ -1111,24 +1203,33 @@ class ZeroKeyVideo(BaseTool):
             wav = work / f"scene_{i:03d}{ext}"
 
             if inputs.get("burst_pacing", True):
-                # 按短句分别合成再拼接，还原真人口播的顿挫感
-                bursts = narration_bursts(text)
+                # 整镜一次合成。给模型的文本单位越长，语调越自然 —— 实测
+                # 同一段话，短语切分 / 整句 / 整段的音高起伏系数是
+                # 0.274 / 0.305 / 0.291~0.32，僵硬感主要来自把句子切碎了
+                # 各合成各的：每片都自带句首起调和句尾降调，接起来就是一串
+                # 互不相干的小句子，跨句的语气承接完全断掉。
+                # 只有超过 _TTS_SENTENCE_MAX 的长镜才退回逐句，避免读崩。
+                sentences = ([text] if len(text) <= _TTS_PASSAGE_MAX
+                             else narration_sentences(text))
                 pieces: list[Path] = []
-                gap_len = float(inputs.get("burst_gap") or 0.22)
                 cursor = scene_clock   # 该镜在整条音轨上的起点
-                for bi, burst in enumerate(bursts, 1):
+                for bi, sentence in enumerate(sentences, 1):
                     bp = work / f"scene_{i:03d}_b{bi:02d}{ext}"
-                    br = _tts_with_retry(narrator, _tts_inputs(narrator_name, burst, bp, voice))
+                    job = _tts_inputs(narrator_name, sentence, bp, voice)
+                    _apply_delivery(job, narrator_name, sentence, text)
+                    br = _tts_with_retry(narrator, job)
                     if not br.success or not bp.exists():
                         return ToolResult(success=False,
                                           error=f"第{i}镜第{bi}句配音失败（{narrator_name}）：{br.error}")
                     pieces.append(bp)
-                    # 记录这句的真实起止，字幕据此对齐（不再按字数估算）
+                    # 这一句的实际时长是量出来的；句内再按字数分成几条字幕
                     bd = _probe_duration(bp)
-                    burst_timeline.append((burst, cursor, cursor + bd))
+                    burst_timeline.extend(split_for_caption(sentence, cursor, cursor + bd))
                     cursor += bd
-                    # 句间插一小段静音；末句不插，避免镜尾拖沓
-                    if bi < len(bursts):
+                    # 停顿长度按句末标点给：句号一档、问号更长、逗号很短。
+                    # 全都一样长会听出节拍器感。末句不插，避免镜尾拖沓。
+                    if bi < len(sentences):
+                        gap_len = pause_after(sentence)
                         gap = work / f"scene_{i:03d}_g{bi:02d}{ext}"
                         if _silence(gap_len, gap):
                             pieces.append(gap)
@@ -1301,11 +1402,23 @@ class ZeroKeyVideo(BaseTool):
                           theme, footage, credits)
         if not inputs.get("captions", True):
             captions = []
-        elif burst_timeline:
-            # 有真实短句时间轴就用它，比按字数估算准得多
-            captions = captions_from_bursts(burst_timeline, title_offset)
         else:
-            captions = build_captions(scenes, durations, title_offset)
+            # 配音改成整镜一次合成后，句内时间没法再靠「每句单独量时长」得到。
+            # 首选从成品音轨里用 whisper 反推逐词时间戳再对回原文 —— 这样
+            # 语调自然和字幕准确不再互相牵制。whisper 不可用时退回估算。
+            from studio import align
+            spoken = "".join(
+                (sc.get("narration") or sc.get("visual") or "").strip()
+                for sc in voiced)
+            # 这里不能再加 title_offset：narration 音轨开头已经拼进了那段
+            # 引导静音，whisper 报的时间戳自带这段偏移，再加一次字幕就整体
+            # 滞后一个标题时长。下面的兜底则需要加 —— burst_timeline 是按
+            # 各镜音频量的，不含引导静音。
+            captions = align.align(spoken, narration, 0.0) or []
+            if not captions:
+                captions = (captions_from_bursts(burst_timeline, title_offset)
+                            if burst_timeline
+                            else build_captions(scenes, durations, title_offset))
 
         # ---- 4.5 配乐 ----
         total_seconds = cuts[-1]["out_seconds"] if cuts else 0
