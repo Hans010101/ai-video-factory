@@ -347,8 +347,9 @@ _GEN_ERRORS: list[str] = []
 
 def generate_shot(query: str, out_dir: Path, index: int, kind: str,
                   budget_left: Optional[float],
-                  prefix: str = "shot",
-                  negative: str = "") -> tuple[Optional[dict[str, str]], float]:
+                  prefix: str = "shot", negative: str = "",
+                  seed: Optional[int] = None
+                  ) -> tuple[Optional[dict[str, str]], float]:
     """素材源没命中时，用 AI 生成一张图或一段视频顶上。
 
     返回 (shot, 实际花费)。预算不够或没有可用生成器时返回 (None, 0.0)，
@@ -367,6 +368,10 @@ def generate_shot(query: str, out_dir: Path, index: int, kind: str,
 
         inputs: dict[str, Any] = {"prompt": query,
                                   "output_path": str(out_dir / f"{prefix}_{index:03d}{suffix}")}
+        if seed is not None:
+            # 同一 seed + 同一身份描述 = 各镜人物长相尽量接近。
+            # 两个模型都不支持参考图，这是唯一可用的一致性手段。
+            inputs["seed"] = seed
         if name == "dashscope_image":
             # 尺寸用星号分隔且要精确 16:9；watermark=False 关掉右下角水印。
             # prompt_extend 会让模型自行扩写提示词，风格容易跑偏，关掉。
@@ -636,7 +641,9 @@ VISUAL_STYLES: dict[str, dict[str, str]] = {
 
 def generate_styled_shot(scene_text: str, style: str, out_dir: Path, index: int,
                          prefix: str, budget_left: Optional[float],
-                         narration: str = "") -> tuple[Optional[dict[str, str]], float]:
+                         narration: str = "", cast: str = "",
+                         seed: Optional[int] = None
+                         ) -> tuple[Optional[dict[str, str]], float]:
     """按选定风格生成整片统一的画面。
 
     与 generate_shot 的区别：那个是「检索没命中时的兜底」，这个是「主动
@@ -655,10 +662,10 @@ def generate_styled_shot(scene_text: str, style: str, out_dir: Path, index: int,
     # 情绪从中文旁白里读，决定机位与光源 —— 此前每镜共用一套提示词，
     # 讲隐忍疲惫时会配出一家人其乐融融的画面。
     subject = to_english(scene_text)[:200]
-    built = shot_prompt.build(narration or scene_text, style, subject)
+    built = shot_prompt.build(narration or scene_text, style, subject, cast=cast)
     return generate_shot(built["prompt"], out_dir, index, "image",
                          budget_left, prefix,
-                         negative=built["negative_prompt"])
+                         negative=built["negative_prompt"], seed=seed)
 
 
 def build_credits(shots: list[Optional[dict[str, str]]]) -> str:
@@ -1109,6 +1116,13 @@ class ZeroKeyVideo(BaseTool):
         # 多是通用城市空镜；生成式插画能精确表达「客厅里沉默的两个人」。
         style = str(inputs.get("visual_style") or "comic").lower()
 
+        # 全片共用一组人物身份和一个 seed —— 模型不记得上一镜是谁，
+        # 一致性只能靠把同一段外貌描述钉进每一镜来维持。
+        from studio import shot_prompt as _sp
+        cast = str(inputs.get("cast") or "") or _sp.detect_cast(brief_text)
+        shot_seed = inputs.get("seed")
+        shot_seed = int(shot_seed) if shot_seed else _sp.cast_seed(brief_text)
+
         if inputs.get("use_footage", True):
             for i, sc in enumerate(scenes):
                 # 同一条画面建议切出的多镜，如果都用同一个检索词，画面只能靠
@@ -1122,7 +1136,7 @@ class ZeroKeyVideo(BaseTool):
                     # 生成式风格：整片统一，构图由提示词约束，不检索素材库
                     shot, spent = generate_styled_shot(
                         query, style, public_dir, i + 1, run_id, budget_left,
-                        narration=own)
+                        narration=own, cast=cast, seed=shot_seed)
                     if shot:
                         ai_count += 1
                         spent_total += spent
@@ -1259,6 +1273,8 @@ class ZeroKeyVideo(BaseTool):
                 "narrator": narrator_name,
                 "narrator_fallbacks": tts_notes,
                 "visual_style": style,
+                "cast": cast,
+                "seed": shot_seed,
                 "generation_errors": list(dict.fromkeys(_GEN_ERRORS))[:4],
                 "captions": len(captions),
                 "music": (music or {}).get("source") or "无",

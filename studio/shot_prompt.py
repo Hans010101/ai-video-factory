@@ -113,8 +113,53 @@ NEGATIVE = ("text, letters, chinese characters, words, captions, signage, "
             "crowd, background people")
 
 
+# 角色一致性。方法取自 seedance-characters：身份锚点 = 年龄段 + 轮廓 +
+# 发型 + 服装，逐镜原样复述；走位和表情每镜单独给。
+#
+# 这两个模型都不支持参考图，只有 seed。所以一致性完全靠「把同一段外貌
+# 描述钉进每一镜」+ 固定 seed 来维持 —— 不能指望模型自己记住上一镜。
+CAST_TEMPLATES: dict[str, str] = {
+    "adult_child": (
+        "Character A: a woman in her early thirties, slim build, "
+        "shoulder-length dark hair tied back, plain oatmeal knit sweater. "
+        "Character B: a man in his sixties, stocky, short grey hair, "
+        "dark blue button shirt"
+    ),
+    "couple": (
+        "Character A: a woman in her early thirties, slim build, "
+        "shoulder-length dark hair tied back, plain oatmeal knit sweater. "
+        "Character B: a man in his mid thirties, medium build, "
+        "short black hair, charcoal grey crewneck"
+    ),
+    "single": (
+        "Character A: a woman in her early thirties, slim build, "
+        "shoulder-length dark hair tied back, plain oatmeal knit sweater"
+    ),
+}
+
+# 中文线索 → 该用哪组人物。选错人物组比长相不一致更出戏。
+_CAST_CUES: list[tuple[tuple[str, ...], str]] = [
+    (("父母", "爸妈", "养育", "供你", "长辈", "母亲", "父亲", "儿女"), "adult_child"),
+    (("婚姻", "伴侣", "夫妻", "另一半", "两个人"), "couple"),
+]
+
+
+def detect_cast(full_text: str) -> str:
+    for cues, cast in _CAST_CUES:
+        if any(c in full_text for c in cues):
+            return cast
+    return "single"
+
+
+def cast_seed(full_text: str) -> int:
+    """由脚本内容派生一个稳定 seed —— 同一篇脚本每次出片长相一致，
+    不同脚本之间又各不相同。"""
+    import hashlib
+    return int(hashlib.md5(full_text[:200].encode()).hexdigest()[:7], 16) % 2_000_000
+
+
 def build(scene_text: str, style: str = "comic",
-          subject_hint: str = "") -> dict[str, Any]:
+          subject_hint: str = "", cast: str = "", ) -> dict[str, Any]:
     """按拍摄简报公式生成一镜的提示词。
 
     scene_text 是该镜的中文旁白（用来判定情绪），subject_hint 是已翻成英文
@@ -127,12 +172,20 @@ def build(scene_text: str, style: str = "comic",
     subject = (subject_hint or "two people in a quiet apartment").strip()
     subject, _ = strip_slop(subject)
 
-    # 顺序即层级：主体动作在前，然后场景、镜头、光、介质。
-    prompt = (
-        f"{subject}. "
-        f"{grammar['camera']}. "
-        f"{grammar['light']}. "
-        f"{medium}. "
-        f"16:9 frame, subjects fully inside the frame with headroom."
-    )
-    return {"prompt": prompt, "negative_prompt": NEGATIVE, "mood": mood}
+    # 身份锚点必须逐镜原样复述 —— 模型不记得上一镜是谁，
+    # 少写一次这一镜的人就换脸了。
+    identity = CAST_TEMPLATES.get(cast, "") if cast else ""
+
+    # 顺序即层级：人物身份 → 主体动作 → 镜头 → 光 → 介质。
+    parts = []
+    if identity:
+        parts.append(identity + ".")
+    parts += [
+        f"{subject}.",
+        f"{grammar['camera']}.",
+        f"{grammar['light']}.",
+        f"{medium}.",
+        "16:9 frame, subjects fully inside the frame with headroom.",
+    ]
+    return {"prompt": " ".join(parts), "negative_prompt": NEGATIVE,
+            "mood": mood, "cast": cast}
