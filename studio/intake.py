@@ -299,11 +299,12 @@ def parse_brief(text: str) -> Brief:
 
     # 脚本给了编号分镜表时，按它的节拍数重新分镜 —— 作者已经想好了
     # 「钩子/冲突/机制/收束」怎么分，比我们按时长机械切分更贴内容。
+    # 统一风格只记在 brief.style 上，不再拌进每一镜的画面描述。
+    # 混进去会被当成「这一镜要画什么」一起翻成英文，再和平台的风格模板
+    # 撞车 —— 脚本写「写实人物」、模板写「ink linework」，两条指令打架，
+    # 模型每镜各挑一条，同一条片子就出现写实和线描两种画风。
     if shot_list:
-        brief.scenes = _apply_shot_list(brief, shot_list, global_style)
-    elif global_style:
-        for s in brief.scenes:
-            s.visual = f"{global_style}，{s.visual}" if s.visual else global_style
+        brief.scenes = _apply_shot_list(brief, shot_list, "")
     brief.style = global_style
     return brief
 

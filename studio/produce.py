@@ -344,11 +344,21 @@ AI_FALLBACK_TOOLS = {
 # 静默退回文字画面会让人以为「功能没做」。
 _GEN_ERRORS: list[str] = []
 
+# 等一会儿就能过的错。403/401/402 不在其列 —— 那是余额或权限问题，
+# 重试多少次都一样，只会白白拖长出片时间。
+_TRANSIENT = ("429", "too many requests", "rate limit", "ratelimit",
+              "throttl", "timeout", "timed out", "502", "503", "504")
+
+
+def _is_transient(message: str) -> bool:
+    low = (message or "").lower()
+    return any(k in low for k in _TRANSIENT)
+
 
 def generate_shot(query: str, out_dir: Path, index: int, kind: str,
                   budget_left: Optional[float],
                   prefix: str = "shot", negative: str = "",
-                  seed: Optional[int] = None
+                  seed: Optional[int] = None, prefer: str = ""
                   ) -> tuple[Optional[dict[str, str]], float]:
     """素材源没命中时，用 AI 生成一张图或一段视频顶上。
 
@@ -361,7 +371,12 @@ def generate_shot(query: str, out_dir: Path, index: int, kind: str,
     registry.ensure_discovered()
 
     suffix = ".png" if kind == "image" else ".mp4"
-    for name in AI_FALLBACK_TOOLS.get(kind, ()):
+    chain = AI_FALLBACK_TOOLS.get(kind, ())
+    if prefer:
+        # 前面几镜用哪个模型出的，后面就接着用哪个。各家画风差别很大，
+        # 中途换厂商会让同一条片子出现两种画风，比省下的几分钱刺眼得多。
+        chain = (prefer,) + tuple(n for n in chain if n != prefer)
+    for name in chain:
         tool = registry.get(name)
         if tool is None or tool.get_status().value not in ("available", "degraded"):
             continue
@@ -369,8 +384,10 @@ def generate_shot(query: str, out_dir: Path, index: int, kind: str,
         inputs: dict[str, Any] = {"prompt": query,
                                   "output_path": str(out_dir / f"{prefix}_{index:03d}{suffix}")}
         if seed is not None:
-            # 同一 seed + 同一身份描述 = 各镜人物长相尽量接近。
-            # 两个模型都不支持参考图，这是唯一可用的一致性手段。
+            # 只为可复现：同一脚本每次出片结果一致，方便定位问题。
+            # 一致性不靠它 —— 靠 shot_prompt 里逐镜复述的身份锚点。
+            # 反过来，全片共用一个 seed 会把同一个坏构图复制到每一镜
+            # （出现过九镜里父女的衣服全部对调），所以调用方按镜号错开。
             inputs["seed"] = seed
         if name == "dashscope_image":
             # 尺寸用星号分隔且要精确 16:9；watermark=False 关掉右下角水印。
@@ -406,10 +423,21 @@ def generate_shot(query: str, out_dir: Path, index: int, kind: str,
         if budget_left is not None and estimate > budget_left:
             continue  # 换更便宜的，都超预算就放弃
 
-        try:
-            result = tool.execute(inputs)
-        except Exception as exc:
-            _GEN_ERRORS.append(f"{name}: {type(exc).__name__}: {exc}"[:160])
+        # 429 是暂时的，退避重试就能过；配额耗尽、密钥失效才该换厂商。
+        # 不区分的话，一次限流就把整片后半段推给了另一家模型，画风分家。
+        result = None
+        for attempt in range(3):
+            try:
+                result = tool.execute(inputs)
+            except Exception as exc:
+                _GEN_ERRORS.append(f"{name}: {type(exc).__name__}: {exc}"[:160])
+                result = None
+                break
+            if result.success or not _is_transient(str(result.error)):
+                break
+            if attempt < 2:
+                time.sleep(6 * (attempt + 1))
+        if result is None:
             continue
         if not result.success:
             # 静默跳过会让人以为「没生成」，实际是配额用尽/密钥失效这类
@@ -424,6 +452,7 @@ def generate_shot(query: str, out_dir: Path, index: int, kind: str,
         spent = float(result.cost_usd or estimate)
         return {
             "file": path.name,
+            "tool": name,
             "source": f"AI 生成 · {name}",
             "creator": "",
             "license": "",
@@ -642,7 +671,8 @@ VISUAL_STYLES: dict[str, dict[str, str]] = {
 def generate_styled_shot(scene_text: str, style: str, out_dir: Path, index: int,
                          prefix: str, budget_left: Optional[float],
                          narration: str = "", cast: str = "",
-                         seed: Optional[int] = None
+                         seed: Optional[int] = None, prefer: str = "",
+                         medium: str = ""
                          ) -> tuple[Optional[dict[str, str]], float]:
     """按选定风格生成整片统一的画面。
 
@@ -656,16 +686,32 @@ def generate_styled_shot(scene_text: str, style: str, out_dir: Path, index: int,
         return None, 0.0
 
     from studio.translate import to_english
-    from studio import shot_prompt
+    from studio import shot_check, shot_prompt
 
     # 按拍摄简报公式组装：主体动作 → 镜头 → 光 → 介质。
     # 情绪从中文旁白里读，决定机位与光源 —— 此前每镜共用一套提示词，
     # 讲隐忍疲惫时会配出一家人其乐融融的画面。
     subject = to_english(scene_text)[:200]
-    built = shot_prompt.build(narration or scene_text, style, subject, cast=cast)
-    return generate_shot(built["prompt"], out_dir, index, "image",
-                         budget_left, prefix,
-                         negative=built["negative_prompt"], seed=seed)
+    built = shot_prompt.build(narration or scene_text, style, subject,
+                              cast=cast, medium_override=medium)
+
+    # 双人镜头有约四分之一概率把两人的衣服互换（FLUX 多主体属性绑定不牢），
+    # 且由 seed 决定，改提示词写法救不了。只能出完自检，翻车就换 seed 重打。
+    spent_total = 0.0
+    for attempt in range(3 if built.get("headcount") == 2 else 1):
+        shot, spent = generate_shot(
+            built["prompt"], out_dir, index, "image", budget_left, prefix,
+            negative=built["negative_prompt"],
+            seed=None if seed is None else seed + attempt * 1000,
+            prefer=prefer)
+        spent_total += spent
+        if budget_left is not None:
+            budget_left = max(budget_left - spent, 0.0)
+        if shot is None:
+            return None, spent_total
+        if not shot_check.wardrobe_swapped(out_dir / shot["file"]):
+            return shot, spent_total  # 没换装，或判不出来 —— 都收下
+    return shot, spent_total  # 三次都翻车就认了，别把预算烧在这一镜上
 
 
 def build_credits(shots: list[Optional[dict[str, str]]]) -> str:
@@ -744,12 +790,10 @@ def build_cuts(scenes: list[dict[str, Any]], durations: list[float],
                 cut["transition_out"] = "fade"
                 cut["transition_duration"] = TRANSITION_SECONDS
         else:
-            # 没找到素材才退回文字画面。text_card 只渲染 text，
-            # callout 能同时呈现画面提示与旁白。
-            if narration and visual:
-                cut.update({"type": "callout", "text": narration, "title": visual})
-            else:
-                cut.update({"type": "text_card", "text": narration or visual or f"第 {i + 1} 镜"})
+            # 没找到素材才退回文字画面。只能放旁白 —— visual 是画面指导，
+            # 里面带着「统一风格：现代中国都市寓言插画、深墨绿…」这类提示词
+            # 原文，是给制作看的，打在成片上非常出戏。
+            cut.update({"type": "text_card", "text": narration or f"第 {i + 1} 镜"})
         cuts.append(cut)
         t += span
 
@@ -1122,7 +1166,15 @@ class ZeroKeyVideo(BaseTool):
         cast = str(inputs.get("cast") or "") or _sp.detect_cast(brief_text)
         shot_seed = inputs.get("seed")
         shot_seed = int(shot_seed) if shot_seed else _sp.cast_seed(brief_text)
+        locked_tool = ""  # 第一镜出图成功后锁定厂商，全片画风统一
+        # 脚本自带的「统一风格」。只翻译一次，全片每一镜共用同一段英文，
+        # 逐镜翻译会得到措辞不同的译文，画风照样会飘。
+        script_medium = ""
+        if brief.style:
+            from studio.translate import to_english
+            script_medium = to_english(brief.style)[:220]
 
+        styled_queries: list[tuple[str, str]] = []
         if inputs.get("use_footage", True):
             for i, sc in enumerate(scenes):
                 # 同一条画面建议切出的多镜，如果都用同一个检索词，画面只能靠
@@ -1136,13 +1188,16 @@ class ZeroKeyVideo(BaseTool):
                     # 生成式风格：整片统一，构图由提示词约束，不检索素材库
                     shot, spent = generate_styled_shot(
                         query, style, public_dir, i + 1, run_id, budget_left,
-                        narration=own, cast=cast, seed=shot_seed)
+                        narration=own, cast=cast, seed=shot_seed + i,
+                        prefer=locked_tool, medium=script_medium)
                     if shot:
+                        locked_tool = shot.get("tool") or locked_tool
                         ai_count += 1
                         spent_total += spent
                         if budget_left is not None:
                             budget_left = max(budget_left - spent, 0.0)
                     footage.append(shot)
+                    styled_queries.append((query, own))
                     continue
 
                 shot = fetch_footage(query, public_dir, i + 1, run_id,
@@ -1159,6 +1214,31 @@ class ZeroKeyVideo(BaseTool):
                 footage.append(shot)
         else:
             footage = [None] * len(scenes)
+
+        # ---- 3b. 补拍：把少数派画风的镜头统一掉 ----
+        # 限流会让前几镜落在 A 家、后几镜落在 B 家，同一条片子出现两种画风。
+        # 出图时无法预知谁会挂，所以只能事后按多数派重出少数派。
+        if styled_queries and len(styled_queries) == len(footage):
+            used = [f["tool"] for f in footage if f and f.get("tool")]
+            if len(set(used)) > 1:
+                from collections import Counter
+                winner = Counter(used).most_common(1)[0][0]
+                for i, f in enumerate(footage):
+                    if not f or f.get("tool") in ("", None, winner):
+                        continue
+                    q, own = styled_queries[i]
+                    # 换个文件名，重出失败时不至于把原来那张好图覆盖成半截文件。
+                    # 仍以 run_id 开头，收尾清理的 glob 照样能删掉。
+                    redo, spent = generate_styled_shot(
+                        q, style, public_dir, i + 1, f"{run_id}r", budget_left,
+                        narration=own, cast=cast, seed=shot_seed + i,
+                        prefer=winner, medium=script_medium)
+                    if redo and redo.get("tool") == winner:
+                        footage[i] = redo
+                        spent_total += spent
+                        if budget_left is not None:
+                            budget_left = max(budget_left - spent, 0.0)
+
         credits = build_credits(footage)
 
         # ---- 4. 构造 Remotion props ----
@@ -1275,6 +1355,9 @@ class ZeroKeyVideo(BaseTool):
                 "visual_style": style,
                 "cast": cast,
                 "seed": shot_seed,
+                # 各镜实际落到哪个模型。混用会导致同片两种画风，
+                # 不打出来只能靠肉眼猜是哪一镜跑偏了。
+                "shot_tools": [(f or {}).get("tool") or "-" for f in footage],
                 "generation_errors": list(dict.fromkeys(_GEN_ERRORS))[:4],
                 "captions": len(captions),
                 "music": (music or {}).get("source") or "无",
