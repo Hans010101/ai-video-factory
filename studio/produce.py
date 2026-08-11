@@ -345,7 +345,8 @@ _GEN_ERRORS: list[str] = []
 
 def generate_shot(query: str, out_dir: Path, index: int, kind: str,
                   budget_left: Optional[float],
-                  prefix: str = "shot") -> tuple[Optional[dict[str, str]], float]:
+                  prefix: str = "shot",
+                  negative: str = "") -> tuple[Optional[dict[str, str]], float]:
     """素材源没命中时，用 AI 生成一张图或一段视频顶上。
 
     返回 (shot, 实际花费)。预算不够或没有可用生成器时返回 (None, 0.0)，
@@ -371,16 +372,16 @@ def generate_shot(query: str, out_dir: Path, index: int, kind: str,
                 "size": "1440*810",
                 "watermark": False,
                 "prompt_extend": False,
-                "negative_prompt": "text, letters, chinese characters, words, "
-                                   "watermark, logo, signature, cut off head, "
-                                   "deformed hands, extra limbs",
+                "negative_prompt": negative or (
+                    "text, letters, chinese characters, words, watermark, "
+                    "logo, signature, cut off head, deformed hands, extra limbs"),
             })
         if name == "gemini_image":
             inputs.setdefault("aspect_ratio", "16:9")
         if name == "flux_image":
             # 正向提示词里写 "no text" 压不住 —— FLUX 仍会在画框、招牌上生成
             # 乱码汉字，非常出戏。负向提示词才是有效手段。
-            inputs["negative_prompt"] = (
+            inputs["negative_prompt"] = negative or (
                 "text, letters, chinese characters, words, captions, subtitles, "
                 "signage, poster text, watermark, logo, signature, "
                 "cropped subject, cut off head, extra limbs, deformed hands, blurry"
@@ -632,8 +633,8 @@ VISUAL_STYLES: dict[str, dict[str, str]] = {
 
 
 def generate_styled_shot(scene_text: str, style: str, out_dir: Path, index: int,
-                         prefix: str, budget_left: Optional[float]
-                         ) -> tuple[Optional[dict[str, str]], float]:
+                         prefix: str, budget_left: Optional[float],
+                         narration: str = "") -> tuple[Optional[dict[str, str]], float]:
     """按选定风格生成整片统一的画面。
 
     与 generate_shot 的区别：那个是「检索没命中时的兜底」，这个是「主动
@@ -646,9 +647,16 @@ def generate_styled_shot(scene_text: str, style: str, out_dir: Path, index: int,
         return None, 0.0
 
     from studio.translate import to_english
-    subject = to_english(scene_text)[:220]
-    return generate_shot(preset["prompt"] + subject, out_dir, index,
-                         "image", budget_left, prefix)
+    from studio import shot_prompt
+
+    # 按拍摄简报公式组装：主体动作 → 镜头 → 光 → 介质。
+    # 情绪从中文旁白里读，决定机位与光源 —— 此前每镜共用一套提示词，
+    # 讲隐忍疲惫时会配出一家人其乐融融的画面。
+    subject = to_english(scene_text)[:200]
+    built = shot_prompt.build(narration or scene_text, style, subject)
+    return generate_shot(built["prompt"], out_dir, index, "image",
+                         budget_left, prefix,
+                         negative=built["negative_prompt"])
 
 
 def build_credits(shots: list[Optional[dict[str, str]]]) -> str:
@@ -1111,7 +1119,8 @@ class ZeroKeyVideo(BaseTool):
                 if style != "footage":
                     # 生成式风格：整片统一，构图由提示词约束，不检索素材库
                     shot, spent = generate_styled_shot(
-                        query, style, public_dir, i + 1, run_id, budget_left)
+                        query, style, public_dir, i + 1, run_id, budget_left,
+                        narration=own)
                     if shot:
                         ai_count += 1
                         spent_total += spent
